@@ -40,18 +40,52 @@ iverilog -g2012 -Wall "-DPROJECT_ROOT=\"${PROJECT_ROOT}\"" \
   "${SCRIPT_DIR}/stem_conv_array_4x4/tb_stem_weight_controller.v"
 vvp /tmp/tb_stem_weight_controller_l2.vvp
 
+iverilog -g2012 -Wall "-DPROJECT_ROOT=\"${PROJECT_ROOT}\"" \
+  -o /tmp/tb_stem_activation_controller_l1.vvp \
+  "${SCRIPT_DIR}/stem_conv_array_4x4/stem_activation_controller.v" \
+  "${SCRIPT_DIR}/stem_conv_array_4x4/tb_stem_activation_controller.v"
+vvp /tmp/tb_stem_activation_controller_l1.vvp
+
+iverilog -g2012 -Wall "-DPROJECT_ROOT=\"${PROJECT_ROOT}\"" \
+  -P tb_stem_activation_controller.BRAM_READ_LATENCY=2 \
+  -o /tmp/tb_stem_activation_controller_l2.vvp \
+  "${SCRIPT_DIR}/stem_conv_array_4x4/stem_activation_controller.v" \
+  "${SCRIPT_DIR}/stem_conv_array_4x4/tb_stem_activation_controller.v"
+vvp /tmp/tb_stem_activation_controller_l2.vvp
+
 stem_ip_root="${SCRIPT_DIR}/../emg_gesture_vivado.gen/sources_1/ip/blk_mem_gen_stem_weight"
 stem_ip_run_dir="${SCRIPT_DIR}/../emg_gesture_vivado.ip_user_files/sim_scripts/blk_mem_gen_stem_weight/xsim"
+act_ip_root="${SCRIPT_DIR}/../emg_gesture_vivado.gen/sources_1/ip/blk_mem_gen_stem_activation"
+act_ip_run_dir="${SCRIPT_DIR}/../emg_gesture_vivado.ip_user_files/sim_scripts/blk_mem_gen_stem_activation/xsim"
+
+if [[ -f "${act_ip_root}/simulation/blk_mem_gen_v8_4.v" \
+      && -f "${act_ip_root}/sim/blk_mem_gen_stem_activation.v" ]]; then
+  iverilog -g2012 -Wall "-DPROJECT_ROOT=\"${PROJECT_ROOT}\"" \
+    -o /tmp/tb_stem_activation_controller_with_ram.vvp \
+    "${act_ip_root}/simulation/blk_mem_gen_v8_4.v" \
+    "${act_ip_root}/sim/blk_mem_gen_stem_activation.v" \
+    "${SCRIPT_DIR}/stem_conv_array_4x4/stem_activation_controller.v" \
+    "${SCRIPT_DIR}/stem_conv_array_4x4/stem_activation_controller_with_ram.v" \
+    "${SCRIPT_DIR}/stem_conv_array_4x4/tb_stem_activation_controller_with_ram.v"
+  (cd "${act_ip_run_dir}" && vvp /tmp/tb_stem_activation_controller_with_ram.vvp)
+else
+  echo "SKIP stem activation RAM IP simulations: generated stem activation IP simulation files not found"
+fi
+
 if [[ -f "${stem_ip_root}/simulation/blk_mem_gen_v8_4.v" \
       && -f "${stem_ip_root}/sim/blk_mem_gen_stem_weight.v" \
+      && -f "${act_ip_root}/sim/blk_mem_gen_stem_activation.v" \
       && -f "${stem_ip_run_dir}/blk_mem_gen_stem_weight.mif" ]]; then
   iverilog -g2012 -Wall "-DPROJECT_ROOT=\"${PROJECT_ROOT}\"" \
     -o /tmp/tb_stem_conv_array_4x4.vvp \
     "${stem_ip_root}/simulation/blk_mem_gen_v8_4.v" \
     "${stem_ip_root}/sim/blk_mem_gen_stem_weight.v" \
+    "${act_ip_root}/sim/blk_mem_gen_stem_activation.v" \
     "${SCRIPT_DIR}/stem_conv_array_4x4/stem_conv_array_4x4_compute.v" \
     "${SCRIPT_DIR}/stem_conv_array_4x4/stem_weight_controller.v" \
     "${SCRIPT_DIR}/stem_conv_array_4x4/stem_weight_controller_with_rom.v" \
+    "${SCRIPT_DIR}/stem_conv_array_4x4/stem_activation_controller.v" \
+    "${SCRIPT_DIR}/stem_conv_array_4x4/stem_activation_controller_with_ram.v" \
     "${SCRIPT_DIR}/stem_conv_array_4x4/stem_conv_array_4x4.v" \
     "${SCRIPT_DIR}/stem_conv_array_4x4/tb_stem_conv_array_4x4.v"
   (cd "${stem_ip_run_dir}" && vvp /tmp/tb_stem_conv_array_4x4.vvp)

@@ -12,8 +12,14 @@ module tb_stem_weight_controller_with_rom;
     localparam integer STEM_K     = 35;
     localparam integer WORD_W     = DATA_W * OC_LANES;
     localparam integer ROM_DEPTH  = STEM_OC / OC_LANES * STEM_K;
+    localparam integer ADDR_W     = (ROM_DEPTH <= 1) ? 1 : $clog2(ROM_DEPTH);
     localparam integer MAX_REQS   = 512;
     localparam integer TIMEOUT    = 2500;
+    // This TB instantiates the generated blk_mem_gen_stem_weight IP, whose
+    // current .xci has READ_LATENCY_A=1. BRAM_READ_LATENCY=2 is covered by the
+    // mock-ROM controller TB unless a separate latency-2 BMG IP is generated.
+    localparam integer BRAM_READ_LATENCY = 1;
+    localparam integer EXPECTED_FIRST_RESPONSE_GAP = BRAM_READ_LATENCY + 2;
 
     localparam integer READY_ALWAYS   = 0;
     localparam integer READY_PERIODIC = 1;
@@ -36,6 +42,7 @@ module tb_stem_weight_controller_with_rom;
 
     reg [WORD_W-1:0] expected_mem [0:ROM_DEPTH-1];
     reg [WORD_W-1:0] expected_queue [0:MAX_REQS-1];
+    reg seen_addr [0:ROM_DEPTH-1];
 
     integer errors;
     integer exp_head;
@@ -45,11 +52,17 @@ module tb_stem_weight_controller_with_rom;
     integer total_responses;
     integer req_stall_count;
     integer req_gap_count;
+    integer first_req_cycle;
+    integer first_resp_cycle;
+    integer unique_addr_count;
     integer cycle_count;
     integer send_idx;
     integer addr;
+    integer cover_i;
 
-    stem_weight_controller_with_rom dut (
+    stem_weight_controller_with_rom #(
+        .BRAM_READ_LATENCY(BRAM_READ_LATENCY)
+    ) dut (
         .clk(clk),
         .rst_n(rst_n),
         .weight_req_valid(weight_req_valid),
@@ -145,6 +158,12 @@ module tb_stem_weight_controller_with_rom;
             total_responses = 0;
             req_stall_count = 0;
             req_gap_count = 0;
+            first_req_cycle = -1;
+            first_resp_cycle = -1;
+            unique_addr_count = 0;
+            for (cover_i = 0; cover_i < ROM_DEPTH; cover_i = cover_i + 1) begin
+                seen_addr[cover_i] = 1'b0;
+            end
         end
     endtask
 
@@ -175,6 +194,25 @@ module tb_stem_weight_controller_with_rom;
                     oc_base_i, k_i, addr);
                 errors = errors + 1;
             end else begin
+                if (dut.rom_en !== 1'b1) begin
+                    $display("ERROR IP rom_en not asserted for accepted request");
+                    errors = errors + 1;
+                end
+                if (dut.rom_addr !== addr[ADDR_W-1:0]) begin
+                    $display("ERROR IP rom_addr got=%0d expected=%0d oc_base=%0d k=%0d",
+                        dut.rom_addr, addr, oc_base_i, k_i);
+                    errors = errors + 1;
+                end
+                if (first_req_cycle < 0) begin
+                    first_req_cycle = cycle_count;
+                end
+                if (seen_addr[addr]) begin
+                    $display("ERROR IP duplicate ROM address in one sequence addr=%0d", addr);
+                    errors = errors + 1;
+                end else begin
+                    seen_addr[addr] = 1'b1;
+                    unique_addr_count = unique_addr_count + 1;
+                end
                 expected_queue[exp_tail] = expected_mem[addr];
                 exp_tail = exp_tail + 1;
                 exp_count = exp_count + 1;
@@ -193,6 +231,9 @@ module tb_stem_weight_controller_with_rom;
                     $display("ERROR weight_vec mismatch at response %0d got=%h expected=%h",
                         total_responses, weight_vec, expected_queue[exp_head]);
                     errors = errors + 1;
+                end
+                if (first_resp_cycle < 0) begin
+                    first_resp_cycle = cycle_count;
                 end
                 exp_head = exp_head + 1;
                 exp_count = exp_count - 1;
@@ -268,6 +309,25 @@ module tb_stem_weight_controller_with_rom;
                 $display("ERROR %0s expected queue not empty count=%0d", label, exp_count);
                 errors = errors + 1;
             end
+            if ((request_count <= ROM_DEPTH) && (unique_addr_count != request_count)) begin
+                $display("ERROR %0s unique ROM addresses got=%0d expected=%0d",
+                    label, unique_addr_count, request_count);
+                errors = errors + 1;
+            end
+            if (ready_mode == READY_ALWAYS) begin
+                if ((first_req_cycle < 0) || (first_resp_cycle < 0)) begin
+                    $display("ERROR %0s missing first request/response cycle tracking req=%0d resp=%0d",
+                        label, first_req_cycle, first_resp_cycle);
+                    errors = errors + 1;
+                end else if ((first_resp_cycle - first_req_cycle) != EXPECTED_FIRST_RESPONSE_GAP) begin
+                    $display("ERROR %0s first response gap got=%0d expected=%0d for true ROM BRAM_READ_LATENCY=%0d",
+                        label,
+                        first_resp_cycle - first_req_cycle,
+                        EXPECTED_FIRST_RESPONSE_GAP,
+                        BRAM_READ_LATENCY);
+                    errors = errors + 1;
+                end
+            end
             if (expect_req_stall && (req_stall_count == 0)) begin
                 $display("ERROR %0s expected request backpressure but saw none", label);
                 errors = errors + 1;
@@ -294,13 +354,16 @@ module tb_stem_weight_controller_with_rom;
             end
 
             $display(
-                "INFO IP %0s requests=%0d responses=%0d cycles=%0d req_stalls=%0d req_gaps=%0d",
+                "INFO IP L%0d %0s requests=%0d responses=%0d cycles=%0d req_stalls=%0d req_gaps=%0d first_gap=%0d unique_addrs=%0d",
+                BRAM_READ_LATENCY,
                 label,
                 total_requests,
                 total_responses,
                 cycle_count,
                 req_stall_count,
-                req_gap_count
+                req_gap_count,
+                first_resp_cycle - first_req_cycle,
+                unique_addr_count
             );
         end
     endtask
