@@ -70,7 +70,6 @@ module tb_stem_conv_array_4x4;
     integer errors;
     integer r;
     integer c;
-    integer k;
     integer test_oc_base;
     integer test_t_base;
     integer stall_mode;
@@ -84,8 +83,6 @@ module tb_stem_conv_array_4x4;
     integer top_case_idx;
     integer load_ch;
     integer load_word;
-    integer load_lane;
-    integer load_t;
     integer load_addr;
 
     reg signed [DATA_W-1:0] expected [0:ROWS-1][0:OC_LANES-1];
