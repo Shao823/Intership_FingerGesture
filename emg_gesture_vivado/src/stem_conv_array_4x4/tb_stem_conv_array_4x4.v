@@ -171,9 +171,9 @@ module tb_stem_conv_array_4x4;
                 end
                 act_req_count <= act_req_count + 1;
             end
-            if (dut.u_activation.u_ctrl.ram_issue) begin
-                act_ram_read_issue_count <= act_ram_read_issue_count + 1;
-            end
+            act_ram_read_issue_count <= act_ram_read_issue_count
+                + dut.u_activation.u_ctrl.ram0_issue
+                + dut.u_activation.u_ctrl.ram1_issue;
         end
     end
 

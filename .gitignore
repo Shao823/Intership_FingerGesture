@@ -1,6 +1,9 @@
 
 /emg_gesture_repro/
 
+# Local tooling (e.g. iverilog source for local build) — not part of design.
+/tools/
+
 # Vivado project: track hand-written RTL/test sources and IP configuration only.
 # Keep generated runs/cache/simulation/output products ignored.
 /emg_gesture_vivado/*

@@ -1,7 +1,12 @@
 `timescale 1ns / 1ps
 
 // Vivado integration wrapper for the stem activation controller and the
-// generated blk_mem_gen_stem_activation simple-dual-port RAM IP.
+// generated blk_mem_gen_stem_activation true-dual-port RAM IP.
+//
+// Port A is time-multiplexed: external activation writes use it while the stem
+// core is idle; otherwise the controller uses it as read port 0. Port B is read
+// port 1. The current non-ping-pong top-level schedule must not write this RAM
+// while the stem activation controller is reading it.
 
 module stem_activation_controller_with_ram #(
     parameter integer DATA_W     = 16,
@@ -35,11 +40,23 @@ module stem_activation_controller_with_ram #(
     output wire signed [ROWS*DATA_W-1:0] act_vec
 );
 
-    wire ram_en;
-    wire [ADDR_W-1:0] ram_addr;
-    wire [ROWS*DATA_W-1:0] ram_dout;
+    wire ram0_en;
+    wire [ADDR_W-1:0] ram0_addr;
+    wire [ROWS*DATA_W-1:0] ram0_dout;
+    wire ram1_en;
+    wire [ADDR_W-1:0] ram1_addr;
+    wire [ROWS*DATA_W-1:0] ram1_dout;
+
+    wire porta_en;
+    wire porta_we;
+    wire [ADDR_W-1:0] porta_addr;
+    wire [ROWS*DATA_W-1:0] porta_din;
 
     assign act_wr_ready = 1'b1;
+    assign porta_en = act_wr_en || ram0_en;
+    assign porta_we = act_wr_en;
+    assign porta_addr = act_wr_en ? act_wr_addr : ram0_addr;
+    assign porta_din = act_wr_en ? act_wr_data : {(ROWS*DATA_W){1'b0}};
 
     stem_activation_controller #(
         .DATA_W(DATA_W),
@@ -64,21 +81,27 @@ module stem_activation_controller_with_ram #(
         .act_vec_valid(act_vec_valid),
         .act_vec_ready(act_vec_ready),
         .act_vec(act_vec),
-        .ram_en(ram_en),
-        .ram_addr(ram_addr),
-        .ram_dout(ram_dout)
+        .ram0_en(ram0_en),
+        .ram0_addr(ram0_addr),
+        .ram0_dout(ram0_dout),
+        .ram1_en(ram1_en),
+        .ram1_addr(ram1_addr),
+        .ram1_dout(ram1_dout)
     );
 
     blk_mem_gen_stem_activation u_stem_activation_ram (
         .clka(clk),
-        .ena(act_wr_en),
-        .wea({act_wr_en}),
-        .addra(act_wr_addr),
-        .dina(act_wr_data),
+        .ena(porta_en),
+        .wea({porta_we}),
+        .addra(porta_addr),
+        .dina(porta_din),
+        .douta(ram0_dout),
         .clkb(clk),
-        .enb(ram_en),
-        .addrb(ram_addr),
-        .doutb(ram_dout)
+        .enb(ram1_en),
+        .web(1'b0),
+        .addrb(ram1_addr),
+        .dinb({(ROWS*DATA_W){1'b0}}),
+        .doutb(ram1_dout)
     );
 
 endmodule

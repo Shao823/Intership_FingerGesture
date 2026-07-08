@@ -325,17 +325,31 @@ module tb_stem_activation_controller_with_ram;
 
     task record_read_issue;
         begin
-            if (dut.u_ctrl.ram_issue) begin
+            if (dut.u_ctrl.ram0_issue) begin
                 read_issue_count = read_issue_count + 1;
-                if (dut.ram_en !== 1'b1) begin
-                    $display("ERROR activation IP ram_en not asserted on read issue");
+                if (dut.ram0_en !== 1'b1) begin
+                    $display("ERROR activation IP ram0_en not asserted on read issue");
                     errors = errors + 1;
                 end
-                if (dut.ram_addr >= RAM_DEPTH) begin
-                    $display("ERROR activation IP ram_addr out of range got=%0d", dut.ram_addr);
+                if (dut.ram0_addr >= RAM_DEPTH) begin
+                    $display("ERROR activation IP ram0_addr out of range got=%0d", dut.ram0_addr);
                     errors = errors + 1;
-                end else if (!seen_read_addr[dut.ram_addr]) begin
-                    seen_read_addr[dut.ram_addr] = 1'b1;
+                end else if (!seen_read_addr[dut.ram0_addr]) begin
+                    seen_read_addr[dut.ram0_addr] = 1'b1;
+                    unique_read_addr_count = unique_read_addr_count + 1;
+                end
+            end
+            if (dut.u_ctrl.ram1_issue) begin
+                read_issue_count = read_issue_count + 1;
+                if (dut.ram1_en !== 1'b1) begin
+                    $display("ERROR activation IP ram1_en not asserted on read issue");
+                    errors = errors + 1;
+                end
+                if (dut.ram1_addr >= RAM_DEPTH) begin
+                    $display("ERROR activation IP ram1_addr out of range got=%0d", dut.ram1_addr);
+                    errors = errors + 1;
+                end else if (!seen_read_addr[dut.ram1_addr]) begin
+                    seen_read_addr[dut.ram1_addr] = 1'b1;
                     unique_read_addr_count = unique_read_addr_count + 1;
                 end
             end
@@ -347,6 +361,7 @@ module tb_stem_activation_controller_with_ram;
         input integer request_count;
         input integer ready_mode;
         input integer req_mode;
+        input integer expect_req_stall;
         input integer expect_req_gap;
         input integer expect_all_addr_cover;
         input [8*64-1:0] label;
@@ -411,8 +426,12 @@ module tb_stem_activation_controller_with_ram;
                 $display("ERROR %0s expected queue not empty count=%0d", label, exp_count);
                 errors = errors + 1;
             end
-            if (req_stall_count == 0) begin
+            if (expect_req_stall && (req_stall_count == 0)) begin
                 $display("ERROR %0s expected controller request stalls but saw none", label);
+                errors = errors + 1;
+            end
+            if (!expect_req_stall && (req_stall_count != 0)) begin
+                $display("ERROR %0s unexpected request stalls=%0d", label, req_stall_count);
                 errors = errors + 1;
             end
             if (expect_req_gap && (req_gap_count == 0)) begin
@@ -538,6 +557,7 @@ module tb_stem_activation_controller_with_ram;
             READY_ALWAYS,
             REQ_CONTINUOUS,
             0,
+            0,
             1,
             "all_435_addresses_aligned"
         );
@@ -548,6 +568,7 @@ module tb_stem_activation_controller_with_ram;
             STEM_K * 6,
             READY_PERIODIC,
             REQ_CONTINUOUS,
+            1,
             0,
             0,
             "padding_unaligned_periodic_ready"
@@ -559,6 +580,7 @@ module tb_stem_activation_controller_with_ram;
             80,
             READY_ALWAYS,
             REQ_MID_GAP,
+            0,
             1,
             0,
             "request_valid_mid_gap"
@@ -570,6 +592,7 @@ module tb_stem_activation_controller_with_ram;
             40,
             READY_HEAD_LOW,
             REQ_CONTINUOUS,
+            1,
             0,
             0,
             "head_response_backpressure"

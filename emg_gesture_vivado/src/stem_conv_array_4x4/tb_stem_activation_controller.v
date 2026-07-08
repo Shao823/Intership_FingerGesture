@@ -45,16 +45,21 @@ module tb_stem_activation_controller #(
     reg act_vec_ready;
     wire signed [WORD_W-1:0] act_vec;
 
-    wire ram_en;
-    wire [ADDR_W-1:0] ram_addr;
-    reg [WORD_W-1:0] ram_dout;
+    wire ram0_en;
+    wire [ADDR_W-1:0] ram0_addr;
+    reg [WORD_W-1:0] ram0_dout;
+    wire ram1_en;
+    wire [ADDR_W-1:0] ram1_addr;
+    reg [WORD_W-1:0] ram1_dout;
 
     reg signed [DATA_W-1:0] raw_input [0:INPUT_LEN*STEM_IC-1];
     reg [WORD_W-1:0] ram_mem [0:RAM_DEPTH-1];
     reg [WORD_W-1:0] expected_queue [0:MAX_REQS-1];
     reg seen_read_addr [0:RAM_DEPTH-1];
-    reg [BRAM_READ_LATENCY-1:0] ram_en_pipe;
-    reg [ADDR_W-1:0] ram_addr_pipe [0:BRAM_READ_LATENCY-1];
+    reg [BRAM_READ_LATENCY-1:0] ram0_en_pipe;
+    reg [ADDR_W-1:0] ram0_addr_pipe [0:BRAM_READ_LATENCY-1];
+    reg [BRAM_READ_LATENCY-1:0] ram1_en_pipe;
+    reg [ADDR_W-1:0] ram1_addr_pipe [0:BRAM_READ_LATENCY-1];
 
     integer errors;
     integer exp_head;
@@ -99,9 +104,12 @@ module tb_stem_activation_controller #(
         .act_vec_valid(act_vec_valid),
         .act_vec_ready(act_vec_ready),
         .act_vec(act_vec),
-        .ram_en(ram_en),
-        .ram_addr(ram_addr),
-        .ram_dout(ram_dout)
+        .ram0_en(ram0_en),
+        .ram0_addr(ram0_addr),
+        .ram0_dout(ram0_dout),
+        .ram1_en(ram1_en),
+        .ram1_addr(ram1_addr),
+        .ram1_dout(ram1_dout)
     );
 
     initial begin
@@ -135,14 +143,21 @@ module tb_stem_activation_controller #(
     always #5 clk = ~clk;
 
     always @(posedge clk) begin
-        ram_en_pipe[0] <= ram_en;
-        ram_addr_pipe[0] <= ram_addr;
+        ram0_en_pipe[0] <= ram0_en;
+        ram0_addr_pipe[0] <= ram0_addr;
+        ram1_en_pipe[0] <= ram1_en;
+        ram1_addr_pipe[0] <= ram1_addr;
         for (pipe_i = 1; pipe_i < BRAM_READ_LATENCY; pipe_i = pipe_i + 1) begin
-            ram_en_pipe[pipe_i] <= ram_en_pipe[pipe_i-1];
-            ram_addr_pipe[pipe_i] <= ram_addr_pipe[pipe_i-1];
+            ram0_en_pipe[pipe_i] <= ram0_en_pipe[pipe_i-1];
+            ram0_addr_pipe[pipe_i] <= ram0_addr_pipe[pipe_i-1];
+            ram1_en_pipe[pipe_i] <= ram1_en_pipe[pipe_i-1];
+            ram1_addr_pipe[pipe_i] <= ram1_addr_pipe[pipe_i-1];
         end
-        if (ram_en_pipe[BRAM_READ_LATENCY-1]) begin
-            ram_dout <= ram_mem[ram_addr_pipe[BRAM_READ_LATENCY-1]];
+        if (ram0_en_pipe[BRAM_READ_LATENCY-1]) begin
+            ram0_dout <= ram_mem[ram0_addr_pipe[BRAM_READ_LATENCY-1]];
+        end
+        if (ram1_en_pipe[BRAM_READ_LATENCY-1]) begin
+            ram1_dout <= ram_mem[ram1_addr_pipe[BRAM_READ_LATENCY-1]];
         end
     end
 
@@ -276,10 +291,13 @@ module tb_stem_activation_controller #(
             act_req_t_base = {TIME_W{1'b0}};
             act_req_k = 6'd0;
             act_vec_ready = 1'b0;
-            ram_dout = {WORD_W{1'b0}};
-            ram_en_pipe = {BRAM_READ_LATENCY{1'b0}};
+            ram0_dout = {WORD_W{1'b0}};
+            ram1_dout = {WORD_W{1'b0}};
+            ram0_en_pipe = {BRAM_READ_LATENCY{1'b0}};
+            ram1_en_pipe = {BRAM_READ_LATENCY{1'b0}};
             for (pipe_i = 0; pipe_i < BRAM_READ_LATENCY; pipe_i = pipe_i + 1) begin
-                ram_addr_pipe[pipe_i] = {ADDR_W{1'b0}};
+                ram0_addr_pipe[pipe_i] = {ADDR_W{1'b0}};
+                ram1_addr_pipe[pipe_i] = {ADDR_W{1'b0}};
             end
             clear_scoreboard();
 
@@ -326,17 +344,31 @@ module tb_stem_activation_controller #(
 
     task record_read_issue;
         begin
-            if (dut.ram_issue) begin
+            if (dut.ram0_issue) begin
                 read_issue_count = read_issue_count + 1;
-                if (ram_en !== 1'b1) begin
-                    $display("ERROR activation ram_en not asserted on read issue");
+                if (ram0_en !== 1'b1) begin
+                    $display("ERROR activation ram0_en not asserted on read issue");
                     errors = errors + 1;
                 end
-                if (ram_addr >= RAM_DEPTH) begin
-                    $display("ERROR activation ram_addr out of range got=%0d", ram_addr);
+                if (ram0_addr >= RAM_DEPTH) begin
+                    $display("ERROR activation ram0_addr out of range got=%0d", ram0_addr);
                     errors = errors + 1;
-                end else if (!seen_read_addr[ram_addr]) begin
-                    seen_read_addr[ram_addr] = 1'b1;
+                end else if (!seen_read_addr[ram0_addr]) begin
+                    seen_read_addr[ram0_addr] = 1'b1;
+                    unique_read_addr_count = unique_read_addr_count + 1;
+                end
+            end
+            if (dut.ram1_issue) begin
+                read_issue_count = read_issue_count + 1;
+                if (ram1_en !== 1'b1) begin
+                    $display("ERROR activation ram1_en not asserted on read issue");
+                    errors = errors + 1;
+                end
+                if (ram1_addr >= RAM_DEPTH) begin
+                    $display("ERROR activation ram1_addr out of range got=%0d", ram1_addr);
+                    errors = errors + 1;
+                end else if (!seen_read_addr[ram1_addr]) begin
+                    seen_read_addr[ram1_addr] = 1'b1;
                     unique_read_addr_count = unique_read_addr_count + 1;
                 end
             end
@@ -348,6 +380,7 @@ module tb_stem_activation_controller #(
         input integer request_count;
         input integer ready_mode;
         input integer req_mode;
+        input integer expect_req_stall;
         input integer expect_req_gap;
         input integer expect_all_addr_cover;
         input [8*64-1:0] label;
@@ -412,8 +445,12 @@ module tb_stem_activation_controller #(
                 $display("ERROR %0s expected queue not empty count=%0d", label, exp_count);
                 errors = errors + 1;
             end
-            if (req_stall_count == 0) begin
+            if (expect_req_stall && (req_stall_count == 0)) begin
                 $display("ERROR %0s expected controller request stalls but saw none", label);
+                errors = errors + 1;
+            end
+            if (!expect_req_stall && (req_stall_count != 0)) begin
+                $display("ERROR %0s unexpected request stalls=%0d", label, req_stall_count);
                 errors = errors + 1;
             end
             if (expect_req_gap && (req_gap_count == 0)) begin
@@ -524,6 +561,7 @@ module tb_stem_activation_controller #(
             READY_ALWAYS,
             REQ_CONTINUOUS,
             0,
+            0,
             1,
             "all_435_addresses_aligned"
         );
@@ -534,6 +572,7 @@ module tb_stem_activation_controller #(
             STEM_K * 6,
             READY_PERIODIC,
             REQ_CONTINUOUS,
+            1,
             0,
             0,
             "padding_unaligned_periodic_ready"
@@ -545,6 +584,7 @@ module tb_stem_activation_controller #(
             80,
             READY_ALWAYS,
             REQ_MID_GAP,
+            0,
             1,
             0,
             "request_valid_mid_gap"
@@ -556,6 +596,7 @@ module tb_stem_activation_controller #(
             40,
             READY_HEAD_LOW,
             REQ_CONTINUOUS,
+            1,
             0,
             0,
             "head_response_backpressure"
