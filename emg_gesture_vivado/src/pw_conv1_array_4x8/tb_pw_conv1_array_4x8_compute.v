@@ -823,11 +823,11 @@ module tb_pw_conv1_array_4x8_compute;
                     );
                     errors = errors + 1;
                 end
-                if (act_req_count != OC_GROUPS * PW1_IC) begin
+                if (act_req_count != PW1_IC) begin
                     $display(
                         "ERROR act_req_count got=%0d expected=%0d",
                         act_req_count,
-                        OC_GROUPS * PW1_IC
+                        PW1_IC
                     );
                     errors = errors + 1;
                 end

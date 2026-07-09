@@ -11,47 +11,17 @@
 //   input:  4 high-resolution rows x 32 channels
 //   output: 2 pooled low-resolution rows x 64 channels
 //
-// The 4x8 array is reused internally for all eight output-channel groups:
-//   oc_base = 0, 8, 16, ..., 56
-// For each group the module emits one pooled output tile:
-//   out_pool_t_base = tile_t_base / 2
-//   out_oc_base     = oc_base
-//   out_tile[(pool_row*OC_LANES + col)*DATA_W +: DATA_W]
+// The 4x8 systolic array is fed continuously for all eight output-channel
+// groups. A global input stream of 256 vectors is interpreted as:
+//   global_idx = oc_group * 32 + k
+//   oc_base    = oc_group * 8
+//   k          = 0..31
 //
-// The module requests a precise input tile before issuing activation requests.
-// input_tile_req_ready must mean the upstream dw1_to_pw1 row packer has four
-// consecutive high-resolution rows, input_tile_req_t_base..+3, with all 32
-// channels valid and can keep them stable for this PW1 job.
-//
-// The row packer should implement the readiness rule:
-//   row_full[t] = &valid_group[t][7:0]
-//   input_tile_req_ready = row_full[input_tile_req_t_base]
-//                       && row_full[input_tile_req_t_base+1]
-//                       && row_full[input_tile_req_t_base+2]
-//                       && row_full[input_tile_req_t_base+3]
-// For the baseline scheduler, tile_t_base must be a multiple of 4 and the
-// downstream pool rows are:
-//   pool_t_base = tile_t_base / 2
-//
-// Runtime activation and weight access are both request/response streams:
-//   act_vec    = {A[tile_t_base+3][k], ..., A[tile_t_base+0][k]}
-//   weight_vec = {W[oc_base+7][k], ..., W[oc_base+0][k]}
-// Requests for the same k may be accepted in different cycles. req_k advances
-// only after both request sides have accepted that k. Response streams must
-// return exactly one vector per accepted request, in request order.
-//
-// Folded BN parameters are kept locally:
-//   w_fold_mem[64], bias_fold_mem[64]
-//
-// Fused compute order:
-//   PW1 conv -> folded BN -> ReLU -> MaxPool1d(kernel=2,stride=2)
-// MaxPool is registered in a separate STATE_POOL cycle. The output tile has two
-// low-resolution rows x eight output channels:
-//   out_tile[(pool_row*OC_LANES + col)*DATA_W +: DATA_W]
-//
-// The output side uses valid/ready. out_valid remains asserted until the
-// downstream pool_to_dw2 writer accepts the tile with out_valid && out_ready.
-// done pulses only after the final oc_base=56 tile is accepted.
+// Per-PE valid/first/last/group metadata is delayed by row+column to match the
+// activation/weight skew through the systolic array. Each PE clears its local
+// accumulator on k=0 and launches its independent BN/ReLU pipeline on k=31.
+// MaxPool is collected from the PE post_valid wavefront, so the array no longer
+// pays a 10-cycle drain/post/pool penalty for every oc group.
 
 module pw_conv1_array_4x8_compute #(
     parameter integer DATA_W     = 16,
@@ -113,24 +83,24 @@ module pw_conv1_array_4x8_compute #(
     output reg signed [POOL_ROWS*OC_LANES*DATA_W-1:0] out_tile
 );
 
+    localparam integer OC_GROUPS   = PW1_OC / OC_LANES;
+    localparam integer TOTAL_MACS  = OC_GROUPS * PW1_IC;
     localparam integer FLUSH_CYCLES = ROWS + OC_LANES - 2;
-    localparam integer REQ_W        = (PW1_IC <= 1) ? 1 : $clog2(PW1_IC + 1);
-    localparam integer DRAIN_W      = (FLUSH_CYCLES <= 1) ? 1 : $clog2(FLUSH_CYCLES + 1);
+    localparam integer REQ_W       = (PW1_IC <= 1) ? 1 : $clog2(PW1_IC + 1);
+    localparam integer TOTAL_W     = (TOTAL_MACS <= 1) ? 1 : $clog2(TOTAL_MACS + 1);
+    localparam integer GROUP_W     = (OC_GROUPS <= 1) ? 1 : $clog2(OC_GROUPS + 1);
+    localparam integer DRAIN_W     = (FLUSH_CYCLES <= 1) ? 1 : $clog2(FLUSH_CYCLES + 1);
+    localparam integer META_STAGES = FLUSH_CYCLES + 1;
+    localparam integer OUT_TILE_W  = POOL_ROWS * OC_LANES * DATA_W;
 
-    localparam [2:0] STATE_IDLE  = 3'd0;
-    localparam [2:0] STATE_WAIT  = 3'd1;
-    localparam [2:0] STATE_MAC   = 3'd2;
-    localparam [2:0] STATE_POST0 = 3'd3;
-    localparam [2:0] STATE_POST1 = 3'd4;
-    localparam [2:0] STATE_POOL  = 3'd5;
-    localparam [2:0] STATE_DONE  = 3'd6;
-    localparam [2:0] STATE_CLEAR = 3'd7;
+    localparam [1:0] STATE_IDLE = 2'd0;
+    localparam [1:0] STATE_WAIT = 2'd1;
+    localparam [1:0] STATE_RUN  = 2'd2;
 
-    reg [2:0] state;
-    reg [5:0] oc_base_reg;
+    reg [1:0] state;
     reg [TIME_W-1:0] tile_t_base_reg;
-    reg [REQ_W-1:0] req_k;
-    reg [REQ_W-1:0] recv_k;
+    reg [TOTAL_W-1:0] req_count;
+    reg [TOTAL_W-1:0] recv_count;
     reg [DRAIN_W-1:0] drain_count;
     reg weight_req_sent;
     reg act_req_sent;
@@ -139,6 +109,8 @@ module pw_conv1_array_4x8_compute #(
     reg signed [OC_LANES*DATA_W-1:0] weight_hold_data;
     reg act_hold_valid;
     reg signed [ROWS*DATA_W-1:0] act_hold_data;
+    reg act_cache_valid;
+    reg signed [ROWS*DATA_W-1:0] act_cache [0:PW1_IC-1];
 
     reg signed [DATA_W-1:0] w_fold_mem [0:PW1_OC-1];
     reg signed [DATA_W-1:0] bias_fold_mem [0:PW1_OC-1];
@@ -150,73 +122,119 @@ module pw_conv1_array_4x8_compute #(
 
     reg signed [DATA_W-1:0] a_delay [0:ROWS-1][0:ROWS-1];
     reg signed [DATA_W-1:0] w_delay [0:OC_LANES-1][0:OC_LANES-1];
-    reg signed [DATA_W-1:0] pool_reg [0:POOL_ROWS-1][0:OC_LANES-1];
 
-    wire [5:0] oc_index [0:OC_LANES-1];
-    wire signed [DATA_W-1:0] raw_a [0:ROWS-1];
-    wire signed [DATA_W-1:0] raw_w [0:OC_LANES-1];
-    wire signed [DATA_W-1:0] a_left [0:ROWS-1];
-    wire signed [DATA_W-1:0] w_top [0:OC_LANES-1];
+    reg meta_valid_d [0:META_STAGES-1];
+    reg meta_first_d [0:META_STAGES-1];
+    reg meta_last_d [0:META_STAGES-1];
+    reg [GROUP_W-1:0] meta_group_d [0:META_STAGES-1];
 
-    wire signed [DATA_W-1:0] a_bus [0:ROWS-1][0:OC_LANES];
-    wire signed [DATA_W-1:0] w_bus [0:ROWS][0:OC_LANES-1];
-    wire signed [DATA_W-1:0] post_bus [0:ROWS-1][0:OC_LANES-1];
+    reg [GROUP_W-1:0] post_group_reg [0:ROWS-1][0:OC_LANES-1];
+    reg signed [DATA_W-1:0] pool_pair_hold [0:OC_GROUPS-1][0:POOL_ROWS-1][0:OC_LANES-1];
+    reg signed [DATA_W-1:0] pool_value [0:OC_GROUPS-1][0:POOL_ROWS-1][0:OC_LANES-1];
+    reg [OUT_TILE_W-1:0] out_buf_data [0:OC_GROUPS-1];
+    reg out_buf_valid [0:OC_GROUPS-1];
+    reg [GROUP_W-1:0] emit_group;
 
+    wire [GROUP_W-1:0] req_group;
+    wire [REQ_W-1:0] req_k_idx;
+    wire [GROUP_W-1:0] recv_group;
+    wire [REQ_W-1:0] recv_k_idx;
     wire request_pending;
+    wire request_needs_act;
     wire weight_req_fire;
     wire act_req_fire;
+    wire act_side_done;
     wire request_pair_done;
     wire can_accept_resp;
+    wire feed_uses_cache;
     wire weight_vec_fire;
     wire act_vec_fire;
     wire weight_avail;
     wire act_avail;
     wire feed_valid;
-    wire flush_valid;
+    wire drain_active;
     wire mac_step_en;
-    wire pe_clear;
-    wire pe_mac_en;
-    wire pe_post0_en;
-    wire pe_post1_en;
-    wire bn_write_en;
     wire input_tile_req_fire;
-    wire last_oc_group;
+    wire pe_clear;
+    wire out_fire;
+    wire [GROUP_W-1:0] emit_group_after_fire;
+    wire can_load_out;
     wire signed [OC_LANES*DATA_W-1:0] feed_weight_vec;
     wire signed [ROWS*DATA_W-1:0] feed_act_vec;
+
+    wire signed [DATA_W-1:0] raw_a [0:ROWS-1];
+    wire signed [DATA_W-1:0] raw_w [0:OC_LANES-1];
+    wire signed [DATA_W-1:0] a_left [0:ROWS-1];
+    wire signed [DATA_W-1:0] w_top [0:OC_LANES-1];
+    wire signed [DATA_W-1:0] a_bus [0:ROWS-1][0:OC_LANES];
+    wire signed [DATA_W-1:0] w_bus [0:ROWS][0:OC_LANES-1];
+    wire pe_mac_valid [0:ROWS-1][0:OC_LANES-1];
+    wire pe_mac_first [0:ROWS-1][0:OC_LANES-1];
+    wire pe_mac_last [0:ROWS-1][0:OC_LANES-1];
+    wire [GROUP_W-1:0] pe_mac_group [0:ROWS-1][0:OC_LANES-1];
+    wire [5:0] pe_oc_index [0:ROWS-1][0:OC_LANES-1];
+    wire pe_post_valid [0:ROWS-1][0:OC_LANES-1];
+    wire signed [DATA_W-1:0] pe_post_out [0:ROWS-1][0:OC_LANES-1];
 
     integer i;
     integer j;
     integer s;
+    integer g;
+    integer pool_r;
+    integer pool_c;
+    integer pool_g;
+    integer pack_r;
+    integer pack_c;
+    reg signed [DATA_W-1:0] pooled_sample;
 
-    assign request_pending = (state == STATE_MAC) && (req_k < PW1_IC);
+    assign req_group = req_count / PW1_IC;
+    assign req_k_idx = req_count % PW1_IC;
+    assign recv_group = recv_count / PW1_IC;
+    assign recv_k_idx = recv_count % PW1_IC;
+
+    assign request_pending = (state == STATE_RUN) && (req_count < TOTAL_MACS);
+    assign request_needs_act = (req_count < PW1_IC);
 
     assign weight_req_valid = request_pending && !weight_req_sent;
-    assign weight_req_oc_base = oc_base_reg;
-    assign weight_req_k = req_k[5:0];
+    assign weight_req_oc_base = req_group * OC_LANES;
+    assign weight_req_k = req_k_idx[5:0];
 
-    assign act_req_valid = request_pending && !act_req_sent;
+    assign act_req_valid = request_pending
+        && request_needs_act
+        && !act_req_sent;
     assign act_req_t_base = tile_t_base_reg;
-    assign act_req_k = req_k[5:0];
+    assign act_req_k = req_k_idx[5:0];
 
     assign weight_req_fire = weight_req_valid && weight_req_ready;
     assign act_req_fire = act_req_valid && act_req_ready;
+    assign act_side_done = !request_needs_act || act_req_sent || act_req_fire;
     assign request_pair_done = request_pending
         && (weight_req_sent || weight_req_fire)
-        && (act_req_sent || act_req_fire);
+        && act_side_done;
 
-    assign can_accept_resp = (state == STATE_MAC) && (recv_k < PW1_IC);
+    assign can_accept_resp = (state == STATE_RUN) && (recv_count < TOTAL_MACS);
+    assign feed_uses_cache = (recv_group != {GROUP_W{1'b0}});
     assign weight_vec_ready = can_accept_resp && !weight_hold_valid;
-    assign act_vec_ready = can_accept_resp && !act_hold_valid;
+    assign act_vec_ready = (state == STATE_RUN)
+        && (recv_count < PW1_IC)
+        && !act_hold_valid;
     assign weight_vec_fire = weight_vec_valid && weight_vec_ready;
     assign act_vec_fire = act_vec_valid && act_vec_ready;
     assign weight_avail = weight_hold_valid || weight_vec_fire;
-    assign act_avail = act_hold_valid || act_vec_fire;
+    assign act_avail = feed_uses_cache
+        ? act_cache_valid
+        : (act_hold_valid || act_vec_fire);
     assign feed_valid = can_accept_resp && weight_avail && act_avail;
-    assign flush_valid = (state == STATE_MAC) && (recv_k == PW1_IC);
-    assign mac_step_en = feed_valid || flush_valid;
+
+    assign drain_active = (state == STATE_RUN)
+        && (recv_count == TOTAL_MACS)
+        && (drain_count < FLUSH_CYCLES);
+    assign mac_step_en = feed_valid || drain_active;
 
     assign feed_weight_vec = weight_hold_valid ? weight_hold_data : weight_vec;
-    assign feed_act_vec = act_hold_valid ? act_hold_data : act_vec;
+    assign feed_act_vec = feed_uses_cache
+        ? act_cache[recv_k_idx]
+        : (act_hold_valid ? act_hold_data : act_vec);
 
     assign input_tile_req_valid = ((state == STATE_IDLE) && start)
         || (state == STATE_WAIT);
@@ -224,19 +242,24 @@ module pw_conv1_array_4x8_compute #(
         ? tile_t_base
         : tile_t_base_reg;
     assign input_tile_req_fire = input_tile_req_valid && input_tile_req_ready;
+    assign pe_clear = input_tile_req_fire;
 
-    assign last_oc_group = (oc_base_reg == (PW1_OC - OC_LANES));
+    assign out_fire = out_valid && out_ready;
+    assign emit_group_after_fire = (out_fire && !out_last_group)
+        ? (emit_group + 1'b1)
+        : emit_group;
+    assign can_load_out = (state == STATE_RUN)
+        && (!out_valid || out_fire)
+        && !(out_fire && out_last_group);
 
-    assign pe_clear = input_tile_req_fire || (state == STATE_CLEAR);
-    assign pe_mac_en = mac_step_en;
-    assign pe_post0_en = (state == STATE_POST0);
-    assign pe_post1_en = (state == STATE_POST1);
-    assign bn_write_en = (state == STATE_IDLE) && !start;
+    assign raw_a[0] = feed_valid ? feed_act_vec[0*DATA_W +: DATA_W] : {DATA_W{1'b0}};
+    assign raw_a[1] = feed_valid ? feed_act_vec[1*DATA_W +: DATA_W] : {DATA_W{1'b0}};
+    assign raw_a[2] = feed_valid ? feed_act_vec[2*DATA_W +: DATA_W] : {DATA_W{1'b0}};
+    assign raw_a[3] = feed_valid ? feed_act_vec[3*DATA_W +: DATA_W] : {DATA_W{1'b0}};
 
     genvar gc;
     generate
-        for (gc = 0; gc < OC_LANES; gc = gc + 1) begin : GEN_OC_INDEX
-            assign oc_index[gc] = oc_base_reg + gc[5:0];
+        for (gc = 0; gc < OC_LANES; gc = gc + 1) begin : GEN_W_BOUNDARY
             assign raw_w[gc] = feed_valid
                 ? feed_weight_vec[gc*DATA_W +: DATA_W]
                 : {DATA_W{1'b0}};
@@ -247,10 +270,7 @@ module pw_conv1_array_4x8_compute #(
 
     genvar gr;
     generate
-        for (gr = 0; gr < ROWS; gr = gr + 1) begin : GEN_A_LEFT
-            assign raw_a[gr] = feed_valid
-                ? feed_act_vec[gr*DATA_W +: DATA_W]
-                : {DATA_W{1'b0}};
+        for (gr = 0; gr < ROWS; gr = gr + 1) begin : GEN_A_BOUNDARY
             assign a_left[gr] = (gr == 0) ? raw_a[gr] : a_delay[gr][gr-1];
             assign a_bus[gr][0] = a_left[gr];
         end
@@ -261,6 +281,22 @@ module pw_conv1_array_4x8_compute #(
     generate
         for (pr = 0; pr < ROWS; pr = pr + 1) begin : GEN_PE_ROW
             for (pc = 0; pc < OC_LANES; pc = pc + 1) begin : GEN_PE_COL
+                if ((pr + pc) == 0) begin : GEN_META_DIRECT
+                    assign pe_mac_valid[pr][pc] = feed_valid;
+                    assign pe_mac_first[pr][pc] =
+                        feed_valid && (recv_k_idx == {REQ_W{1'b0}});
+                    assign pe_mac_last[pr][pc] =
+                        feed_valid && (recv_k_idx == (PW1_IC - 1));
+                    assign pe_mac_group[pr][pc] = recv_group;
+                end else begin : GEN_META_DELAYED
+                    assign pe_mac_valid[pr][pc] = meta_valid_d[pr+pc-1];
+                    assign pe_mac_first[pr][pc] = meta_first_d[pr+pc-1];
+                    assign pe_mac_last[pr][pc] = meta_last_d[pr+pc-1];
+                    assign pe_mac_group[pr][pc] = meta_group_d[pr+pc-1];
+                end
+                assign pe_oc_index[pr][pc] =
+                    (pe_mac_group[pr][pc] * OC_LANES) + pc[5:0];
+
                 pw_conv1_systolic_pe #(
                     .DATA_W(DATA_W),
                     .ACC_W(ACC_W),
@@ -269,27 +305,31 @@ module pw_conv1_array_4x8_compute #(
                     .clk(clk),
                     .rst_n(rst_n),
                     .clear(pe_clear),
-                    .mac_en(pe_mac_en),
-                    .post0_en(pe_post0_en),
-                    .post1_en(pe_post1_en),
+                    .mac_en(mac_step_en),
+                    .mac_valid(pe_mac_valid[pr][pc]),
+                    .mac_first(pe_mac_first[pr][pc]),
+                    .mac_last(pe_mac_last[pr][pc]),
                     .a_in(a_bus[pr][pc]),
                     .w_in(w_bus[pr][pc]),
-                    .bn_scale(w_fold_mem[oc_index[pc]]),
-                    .bn_bias(bias_fold_mem[oc_index[pc]]),
+                    .bn_scale(w_fold_mem[pe_oc_index[pr][pc]]),
+                    .bn_bias(bias_fold_mem[pe_oc_index[pr][pc]]),
                     .a_out(a_bus[pr][pc+1]),
                     .w_out(w_bus[pr+1][pc]),
-                    .post_out(post_bus[pr][pc])
+                    .post_valid(pe_post_valid[pr][pc]),
+                    .post_out(pe_post_out[pr][pc])
                 );
             end
         end
     endgenerate
 
     always @(posedge clk) begin
-        if (bn_write_en && w_fold_we) begin
-            w_fold_mem[w_fold_oc] <= w_fold_wdata;
-        end
-        if (bn_write_en && bias_fold_we) begin
-            bias_fold_mem[bias_fold_oc] <= bias_fold_wdata;
+        if ((state == STATE_IDLE) && !start) begin
+            if (w_fold_we) begin
+                w_fold_mem[w_fold_oc] <= w_fold_wdata;
+            end
+            if (bias_fold_we) begin
+                bias_fold_mem[bias_fold_oc] <= bias_fold_wdata;
+            end
         end
     end
 
@@ -299,7 +339,7 @@ module pw_conv1_array_4x8_compute #(
             weight_hold_data <= {(OC_LANES*DATA_W){1'b0}};
             act_hold_valid <= 1'b0;
             act_hold_data <= {(ROWS*DATA_W){1'b0}};
-        end else if (pe_clear || (state != STATE_MAC)) begin
+        end else if (pe_clear || (state != STATE_RUN)) begin
             weight_hold_valid <= 1'b0;
             weight_hold_data <= {(OC_LANES*DATA_W){1'b0}};
             act_hold_valid <= 1'b0;
@@ -323,6 +363,19 @@ module pw_conv1_array_4x8_compute #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            act_cache_valid <= 1'b0;
+        end else if (pe_clear) begin
+            act_cache_valid <= 1'b0;
+        end else if (feed_valid && (recv_group == {GROUP_W{1'b0}})) begin
+            act_cache[recv_k_idx] <= feed_act_vec;
+            if (recv_k_idx == (PW1_IC - 1)) begin
+                act_cache_valid <= 1'b1;
+            end
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
             for (i = 0; i < ROWS; i = i + 1) begin
                 for (s = 0; s < ROWS; s = s + 1) begin
                     a_delay[i][s] <= {DATA_W{1'b0}};
@@ -332,6 +385,12 @@ module pw_conv1_array_4x8_compute #(
                 for (s = 0; s < OC_LANES; s = s + 1) begin
                     w_delay[j][s] <= {DATA_W{1'b0}};
                 end
+            end
+            for (s = 0; s < META_STAGES; s = s + 1) begin
+                meta_valid_d[s] <= 1'b0;
+                meta_first_d[s] <= 1'b0;
+                meta_last_d[s] <= 1'b0;
+                meta_group_d[s] <= {GROUP_W{1'b0}};
             end
         end else if (pe_clear) begin
             for (i = 0; i < ROWS; i = i + 1) begin
@@ -343,6 +402,12 @@ module pw_conv1_array_4x8_compute #(
                 for (s = 0; s < OC_LANES; s = s + 1) begin
                     w_delay[j][s] <= {DATA_W{1'b0}};
                 end
+            end
+            for (s = 0; s < META_STAGES; s = s + 1) begin
+                meta_valid_d[s] <= 1'b0;
+                meta_first_d[s] <= 1'b0;
+                meta_last_d[s] <= 1'b0;
+                meta_group_d[s] <= {GROUP_W{1'b0}};
             end
         end else if (mac_step_en) begin
             for (i = 0; i < ROWS; i = i + 1) begin
@@ -357,20 +422,16 @@ module pw_conv1_array_4x8_compute #(
                     w_delay[j][s] <= w_delay[j][s-1];
                 end
             end
-        end
-    end
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (i = 0; i < POOL_ROWS; i = i + 1) begin
-                for (j = 0; j < OC_LANES; j = j + 1) begin
-                    pool_reg[i][j] <= {DATA_W{1'b0}};
-                end
-            end
-        end else if (state == STATE_POOL) begin
-            for (j = 0; j < OC_LANES; j = j + 1) begin
-                pool_reg[0][j] <= signed_max(post_bus[0][j], post_bus[1][j]);
-                pool_reg[1][j] <= signed_max(post_bus[2][j], post_bus[3][j]);
+            meta_valid_d[0] <= feed_valid;
+            meta_first_d[0] <= feed_valid && (recv_k_idx == {REQ_W{1'b0}});
+            meta_last_d[0] <= feed_valid && (recv_k_idx == (PW1_IC - 1));
+            meta_group_d[0] <= recv_group;
+            for (s = 1; s < META_STAGES; s = s + 1) begin
+                meta_valid_d[s] <= meta_valid_d[s-1];
+                meta_first_d[s] <= meta_first_d[s-1];
+                meta_last_d[s] <= meta_last_d[s-1];
+                meta_group_d[s] <= meta_group_d[s-1];
             end
         end
     end
@@ -378,10 +439,9 @@ module pw_conv1_array_4x8_compute #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= STATE_IDLE;
-            oc_base_reg <= 6'd0;
             tile_t_base_reg <= {TIME_W{1'b0}};
-            req_k <= {REQ_W{1'b0}};
-            recv_k <= {REQ_W{1'b0}};
+            req_count <= {TOTAL_W{1'b0}};
+            recv_count <= {TOTAL_W{1'b0}};
             drain_count <= {DRAIN_W{1'b0}};
             weight_req_sent <= 1'b0;
             act_req_sent <= 1'b0;
@@ -391,51 +451,106 @@ module pw_conv1_array_4x8_compute #(
             out_pool_t_base <= {TIME_W{1'b0}};
             out_oc_base <= 6'd0;
             out_last_group <= 1'b0;
-            out_tile <= {(POOL_ROWS*OC_LANES*DATA_W){1'b0}};
+            out_tile <= {OUT_TILE_W{1'b0}};
+            emit_group <= {GROUP_W{1'b0}};
+            for (g = 0; g < OC_GROUPS; g = g + 1) begin
+                out_buf_valid[g] <= 1'b0;
+                out_buf_data[g] <= {OUT_TILE_W{1'b0}};
+                for (i = 0; i < POOL_ROWS; i = i + 1) begin
+                    for (j = 0; j < OC_LANES; j = j + 1) begin
+                        pool_pair_hold[g][i][j] <= {DATA_W{1'b0}};
+                        pool_value[g][i][j] <= {DATA_W{1'b0}};
+                    end
+                end
+            end
+            for (i = 0; i < ROWS; i = i + 1) begin
+                for (j = 0; j < OC_LANES; j = j + 1) begin
+                    post_group_reg[i][j] <= {GROUP_W{1'b0}};
+                end
+            end
         end else begin
             done <= 1'b0;
+
+            for (pool_r = 0; pool_r < ROWS; pool_r = pool_r + 1) begin
+                for (pool_c = 0; pool_c < OC_LANES; pool_c = pool_c + 1) begin
+                    if (mac_step_en
+                        && pe_mac_valid[pool_r][pool_c]
+                        && pe_mac_last[pool_r][pool_c]) begin
+                        post_group_reg[pool_r][pool_c] <= pe_mac_group[pool_r][pool_c];
+                    end
+
+                    if (pe_post_valid[pool_r][pool_c]) begin
+                        pool_g = post_group_reg[pool_r][pool_c];
+                        if (pool_r == 0) begin
+                            pool_pair_hold[pool_g][0][pool_c] <= pe_post_out[pool_r][pool_c];
+                        end else if (pool_r == 1) begin
+                            pooled_sample = signed_max(
+                                pool_pair_hold[pool_g][0][pool_c],
+                                pe_post_out[pool_r][pool_c]
+                            );
+                            pool_value[pool_g][0][pool_c] <= pooled_sample;
+                        end else if (pool_r == 2) begin
+                            pool_pair_hold[pool_g][1][pool_c] <= pe_post_out[pool_r][pool_c];
+                        end else begin
+                            pooled_sample = signed_max(
+                                pool_pair_hold[pool_g][1][pool_c],
+                                pe_post_out[pool_r][pool_c]
+                            );
+                            pool_value[pool_g][1][pool_c] <= pooled_sample;
+                            if (pool_c == (OC_LANES - 1)) begin
+                                for (pack_r = 0; pack_r < POOL_ROWS; pack_r = pack_r + 1) begin
+                                    for (pack_c = 0; pack_c < OC_LANES; pack_c = pack_c + 1) begin
+                                        if ((pack_r == 1) && (pack_c == pool_c)) begin
+                                            out_buf_data[pool_g][
+                                                (pack_r*OC_LANES + pack_c)*DATA_W +: DATA_W
+                                            ] <= pooled_sample;
+                                        end else begin
+                                            out_buf_data[pool_g][
+                                                (pack_r*OC_LANES + pack_c)*DATA_W +: DATA_W
+                                            ] <= pool_value[pool_g][pack_r][pack_c];
+                                        end
+                                    end
+                                end
+                                out_buf_valid[pool_g] <= 1'b1;
+                            end
+                        end
+                    end
+                end
+            end
 
             case (state)
                 STATE_IDLE: begin
                     busy <= 1'b0;
                     out_valid <= 1'b0;
                     out_last_group <= 1'b0;
-                    req_k <= {REQ_W{1'b0}};
-                    recv_k <= {REQ_W{1'b0}};
+                    req_count <= {TOTAL_W{1'b0}};
+                    recv_count <= {TOTAL_W{1'b0}};
                     drain_count <= {DRAIN_W{1'b0}};
                     weight_req_sent <= 1'b0;
                     act_req_sent <= 1'b0;
+                    emit_group <= {GROUP_W{1'b0}};
                     if (start) begin
                         busy <= 1'b1;
-                        oc_base_reg <= 6'd0;
                         tile_t_base_reg <= tile_t_base;
-                        state <= input_tile_req_ready ? STATE_MAC : STATE_WAIT;
+                        for (g = 0; g < OC_GROUPS; g = g + 1) begin
+                            out_buf_valid[g] <= 1'b0;
+                        end
+                        state <= input_tile_req_ready ? STATE_RUN : STATE_WAIT;
                     end
                 end
 
                 STATE_WAIT: begin
                     busy <= 1'b1;
                     if (input_tile_req_ready) begin
-                        state <= STATE_MAC;
+                        state <= STATE_RUN;
                     end
                 end
 
-                STATE_CLEAR: begin
+                STATE_RUN: begin
                     busy <= 1'b1;
-                    out_valid <= 1'b0;
-                    out_last_group <= 1'b0;
-                    req_k <= {REQ_W{1'b0}};
-                    recv_k <= {REQ_W{1'b0}};
-                    drain_count <= {DRAIN_W{1'b0}};
-                    weight_req_sent <= 1'b0;
-                    act_req_sent <= 1'b0;
-                    state <= STATE_MAC;
-                end
 
-                STATE_MAC: begin
-                    busy <= 1'b1;
                     if (request_pair_done) begin
-                        req_k <= req_k + 1'b1;
+                        req_count <= req_count + 1'b1;
                         weight_req_sent <= 1'b0;
                         act_req_sent <= 1'b0;
                     end else begin
@@ -448,52 +563,30 @@ module pw_conv1_array_4x8_compute #(
                     end
 
                     if (feed_valid) begin
-                        recv_k <= recv_k + 1'b1;
-                    end else if (flush_valid) begin
-                        if (drain_count == FLUSH_CYCLES-1) begin
-                            drain_count <= {DRAIN_W{1'b0}};
-                            state <= STATE_POST0;
-                        end else begin
-                            drain_count <= drain_count + 1'b1;
-                        end
+                        recv_count <= recv_count + 1'b1;
+                    end else if (drain_active) begin
+                        drain_count <= drain_count + 1'b1;
                     end
-                end
 
-                STATE_POST0: begin
-                    state <= STATE_POST1;
-                end
-
-                STATE_POST1: begin
-                    state <= STATE_POOL;
-                end
-
-                STATE_POOL: begin
-                    state <= STATE_DONE;
-                end
-
-                STATE_DONE: begin
-                    busy <= 1'b1;
-                    if (!out_valid) begin
-                        for (i = 0; i < POOL_ROWS; i = i + 1) begin
-                            for (j = 0; j < OC_LANES; j = j + 1) begin
-                                out_tile[(i*OC_LANES + j)*DATA_W +: DATA_W]
-                                    <= pool_reg[i][j];
-                            end
-                        end
-                        out_pool_t_base <= tile_t_base_reg >> 1;
-                        out_oc_base <= oc_base_reg;
-                        out_last_group <= last_oc_group;
-                        out_valid <= 1'b1;
-                    end else if (out_ready) begin
+                    if (out_fire) begin
                         out_valid <= 1'b0;
-                        if (last_oc_group) begin
+                        if (out_last_group) begin
                             done <= 1'b1;
                             busy <= 1'b0;
                             state <= STATE_IDLE;
                         end else begin
-                            oc_base_reg <= oc_base_reg + OC_LANES[5:0];
-                            state <= STATE_CLEAR;
+                            emit_group <= emit_group + 1'b1;
                         end
+                    end
+
+                    if (can_load_out && out_buf_valid[emit_group_after_fire]) begin
+                        out_tile <= out_buf_data[emit_group_after_fire];
+                        out_pool_t_base <= tile_t_base_reg >> 1;
+                        out_oc_base <= emit_group_after_fire * OC_LANES;
+                        out_last_group <= (emit_group_after_fire == (OC_GROUPS - 1));
+                        out_valid <= 1'b1;
+                        out_buf_valid[emit_group_after_fire] <= 1'b0;
+                        emit_group <= emit_group_after_fire;
                     end
                 end
 
@@ -525,8 +618,9 @@ module pw_conv1_systolic_pe #(
     input  wire rst_n,
     input  wire clear,
     input  wire mac_en,
-    input  wire post0_en,
-    input  wire post1_en,
+    input  wire mac_valid,
+    input  wire mac_first,
+    input  wire mac_last,
 
     input  wire signed [DATA_W-1:0] a_in,
     input  wire signed [DATA_W-1:0] w_in,
@@ -535,61 +629,81 @@ module pw_conv1_systolic_pe #(
 
     output reg signed [DATA_W-1:0] a_out,
     output reg signed [DATA_W-1:0] w_out,
+    output reg post_valid,
     output reg signed [DATA_W-1:0] post_out
 );
 
     reg signed [ACC_W-1:0] acc;
     reg signed [31:0] bn_mul;
+    reg signed [DATA_W-1:0] bn_bias_d;
+    reg bn_valid;
 
+    (* use_dsp = "yes" *) wire signed [31:0] mac_mul_p;
+    wire signed [ACC_W-1:0] mac_product_ext;
+    wire signed [ACC_W-1:0] acc_next;
     wire signed [DATA_W-1:0] conv_q;
-    wire signed [DATA_W-1:0] mul_a;
-    wire signed [DATA_W-1:0] mul_b;
-    (* use_dsp = "yes" *) wire signed [31:0] mul_p;
+    (* use_dsp = "yes" *) wire signed [31:0] bn_mul_p;
 
     reg signed [31:0] post_shifted;
     reg signed [31:0] post_biased;
     reg signed [DATA_W-1:0] bn_q;
 
-    assign conv_q = sat_q8_8_from_acc_shift(acc);
-    assign mul_a = post0_en ? conv_q : a_in;
-    assign mul_b = post0_en ? bn_scale : w_in;
-    assign mul_p = $signed(mul_a) * $signed(mul_b);
+    assign mac_mul_p = $signed(a_in) * $signed(w_in);
+    assign mac_product_ext = $signed({{(ACC_W-32){mac_mul_p[31]}}, mac_mul_p});
+    assign acc_next = mac_first ? mac_product_ext : (acc + mac_product_ext);
+    assign conv_q = sat_q8_8_from_acc_shift(acc_next);
+    assign bn_mul_p = $signed(conv_q) * $signed(bn_scale);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             acc <= {ACC_W{1'b0}};
             bn_mul <= 32'sd0;
+            bn_bias_d <= {DATA_W{1'b0}};
+            bn_valid <= 1'b0;
             post_shifted <= 32'sd0;
             post_biased <= 32'sd0;
             bn_q <= {DATA_W{1'b0}};
             a_out <= {DATA_W{1'b0}};
             w_out <= {DATA_W{1'b0}};
+            post_valid <= 1'b0;
             post_out <= {DATA_W{1'b0}};
         end else if (clear) begin
             acc <= {ACC_W{1'b0}};
             bn_mul <= 32'sd0;
+            bn_bias_d <= {DATA_W{1'b0}};
+            bn_valid <= 1'b0;
             post_shifted <= 32'sd0;
             post_biased <= 32'sd0;
             bn_q <= {DATA_W{1'b0}};
             a_out <= {DATA_W{1'b0}};
             w_out <= {DATA_W{1'b0}};
+            post_valid <= 1'b0;
             post_out <= {DATA_W{1'b0}};
         end else begin
-            if (mac_en) begin
-                acc <= acc + $signed({{(ACC_W-32){mul_p[31]}}, mul_p});
-                a_out <= a_in;
-                w_out <= w_in;
-            end
+            post_valid <= 1'b0;
 
-            if (post0_en) begin
-                bn_mul <= mul_p;
-            end
-
-            if (post1_en) begin
+            if (bn_valid) begin
                 post_shifted = bn_mul >>> FRAC_BITS;
-                post_biased = post_shifted + $signed({{(32-DATA_W){bn_bias[DATA_W-1]}}, bn_bias});
+                post_biased = post_shifted
+                    + $signed({{(32-DATA_W){bn_bias_d[DATA_W-1]}}, bn_bias_d});
                 bn_q = sat_q8_8_from_32(post_biased);
                 post_out <= bn_q[DATA_W-1] ? {DATA_W{1'b0}} : bn_q;
+                post_valid <= 1'b1;
+            end
+
+            bn_valid <= 1'b0;
+
+            if (mac_en) begin
+                a_out <= a_in;
+                w_out <= w_in;
+                if (mac_valid) begin
+                    acc <= acc_next;
+                    if (mac_last) begin
+                        bn_mul <= bn_mul_p;
+                        bn_bias_d <= bn_bias;
+                        bn_valid <= 1'b1;
+                    end
+                end
             end
         end
     end
