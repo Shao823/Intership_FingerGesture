@@ -106,6 +106,8 @@ module dw_conv2_4ch_5tap #(
     wire out_fire;
     wire fifo_push;
     wire fifo_has_space;
+    wire pipe_advance;
+    wire pipe_out_fire;
     wire weight_write_en;
     wire win_req_fire;
     wire win_vec_fire;
@@ -114,14 +116,32 @@ module dw_conv2_4ch_5tap #(
     wire [TIME_W-1:0] current_resp_out_t;
     wire [5:0] current_req_ch_base;
     wire [5:0] current_resp_ch_base;
-    wire signed [DATA_W-1:0] window_x [0:K-1][0:P_CH-1];
-    wire signed [DATA_W-1:0] lane_y [0:P_CH-1];
-    wire signed [P_CH*DATA_W-1:0] result_vec;
-    wire [5:0] ch_index [0:P_CH-1];
+
+    reg s0_valid;
+    reg [TIME_W-1:0] s0_t;
+    reg [5:0] s0_ch_base;
+    reg signed [DATA_W-1:0] s0_x [0:K-1][0:P_CH-1];
+    reg signed [DATA_W-1:0] s0_w [0:K-1][0:P_CH-1];
+
+    reg s1_valid;
+    reg [TIME_W-1:0] s1_t;
+    reg [5:0] s1_ch_base;
+    reg signed [31:0] s1_p [0:K-1][0:P_CH-1];
+
+    reg s2_valid;
+    reg [TIME_W-1:0] s2_t;
+    reg [5:0] s2_ch_base;
+    reg signed [P_CH*DATA_W-1:0] s2_vec;
+
+    integer pipe_tap;
+    integer pipe_lane;
+    reg signed [ACC_W-1:0] pipe_acc;
 
     assign out_fire = out_valid && out_ready;
-    assign fifo_push = win_vec_fire;
+    assign fifo_push = pipe_out_fire;
     assign fifo_has_space = (fifo_count != 2'd2) || out_fire;
+    assign pipe_advance = !s2_valid || fifo_has_space;
+    assign pipe_out_fire = s2_valid && fifo_has_space;
     assign weight_write_en = weight_we && (state == STATE_IDLE) && !start;
     assign current_req_out_t = job_out_t_start + req_count[TIME_W-1:0];
     assign current_resp_out_t = job_out_t_start + resp_count[TIME_W-1:0];
@@ -139,7 +159,7 @@ module dw_conv2_4ch_5tap #(
         && (job_out_count != 0)
         && (req_group_idx < CH_GROUPS_PER_JOB)
         && !outstanding
-        && fifo_has_space;
+        && pipe_advance;
     assign win_req_out_t = current_req_out_t;
     assign win_req_ch_base = current_req_ch_base;
     assign win_req_fire = win_req_valid && win_req_ready;
@@ -148,45 +168,9 @@ module dw_conv2_4ch_5tap #(
         && (job_out_count != 0)
         && (resp_group_idx < CH_GROUPS_PER_JOB)
         && (outstanding || win_req_fire)
-        && fifo_has_space;
+        && pipe_advance;
     assign win_vec_ready = can_accept_resp;
     assign win_vec_fire = win_vec_valid && win_vec_ready;
-
-    genvar gt;
-    genvar gl;
-    generate
-        for (gl = 0; gl < P_CH; gl = gl + 1) begin : GEN_CH_INDEX
-            assign ch_index[gl] = current_resp_ch_base + gl[5:0];
-        end
-
-        for (gt = 0; gt < K; gt = gt + 1) begin : GEN_TAP
-            for (gl = 0; gl < P_CH; gl = gl + 1) begin : GEN_LANE
-                assign window_x[gt][gl] =
-                    win_vec[(gt*P_CH + gl)*DATA_W +: DATA_W];
-            end
-        end
-
-        for (gl = 0; gl < P_CH; gl = gl + 1) begin : GEN_LANE_PE
-            dw_conv2_lane_5tap #(
-                .DATA_W(DATA_W),
-                .ACC_W(ACC_W),
-                .FRAC_BITS(FRAC_BITS)
-            ) u_lane (
-                .x0(window_x[0][gl]),
-                .x1(window_x[1][gl]),
-                .x2(window_x[2][gl]),
-                .x3(window_x[3][gl]),
-                .x4(window_x[4][gl]),
-                .w0(weight_mem[ch_index[gl]*K + 0]),
-                .w1(weight_mem[ch_index[gl]*K + 1]),
-                .w2(weight_mem[ch_index[gl]*K + 2]),
-                .w3(weight_mem[ch_index[gl]*K + 3]),
-                .w4(weight_mem[ch_index[gl]*K + 4]),
-                .y(lane_y[gl])
-            );
-            assign result_vec[gl*DATA_W +: DATA_W] = lane_y[gl];
-        end
-    endgenerate
 
     initial begin
         $readmemh(WEIGHT_INIT_FILE, weight_mem);
@@ -236,6 +220,21 @@ module dw_conv2_4ch_5tap #(
         end
     endfunction
 
+    function signed [DATA_W-1:0] sat_q8_8_from_acc_shift;
+        input signed [ACC_W-1:0] value;
+        reg signed [ACC_W-1:0] shifted;
+        begin
+            shifted = value >>> FRAC_BITS;
+            if (shifted > $signed({1'b0, {(DATA_W-1){1'b1}}})) begin
+                sat_q8_8_from_acc_shift = {1'b0, {(DATA_W-1){1'b1}}};
+            end else if (shifted < $signed({1'b1, {(DATA_W-1){1'b0}}})) begin
+                sat_q8_8_from_acc_shift = {1'b1, {(DATA_W-1){1'b0}}};
+            end else begin
+                sat_q8_8_from_acc_shift = shifted[DATA_W-1:0];
+            end
+        end
+    endfunction
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= STATE_IDLE;
@@ -252,6 +251,16 @@ module dw_conv2_4ch_5tap #(
             fifo_vec[0] <= {(P_CH*DATA_W){1'b0}};
             fifo_vec[1] <= {(P_CH*DATA_W){1'b0}};
             fifo_count <= 2'd0;
+            s0_valid <= 1'b0;
+            s0_t <= {TIME_W{1'b0}};
+            s0_ch_base <= 6'd0;
+            s1_valid <= 1'b0;
+            s1_t <= {TIME_W{1'b0}};
+            s1_ch_base <= 6'd0;
+            s2_valid <= 1'b0;
+            s2_t <= {TIME_W{1'b0}};
+            s2_ch_base <= 6'd0;
+            s2_vec <= {(P_CH*DATA_W){1'b0}};
             busy <= 1'b0;
             done <= 1'b0;
             job_out_t_start <= {TIME_W{1'b0}};
@@ -268,6 +277,9 @@ module dw_conv2_4ch_5tap #(
                     resp_group_idx <= 2'd0;
                     outstanding <= 1'b0;
                     fifo_count <= 2'd0;
+                    s0_valid <= 1'b0;
+                    s1_valid <= 1'b0;
+                    s2_valid <= 1'b0;
 
                     if (start) begin
                         ch_base_reg <= ch_base;
@@ -312,14 +324,14 @@ module dw_conv2_4ch_5tap #(
                     case ({out_fire, fifo_push})
                         2'b01: begin
                             if (fifo_count == 2'd0) begin
-                                fifo_t[0] <= current_resp_out_t;
-                                fifo_ch_base[0] <= current_resp_ch_base;
-                                fifo_vec[0] <= result_vec;
+                                fifo_t[0] <= s2_t;
+                                fifo_ch_base[0] <= s2_ch_base;
+                                fifo_vec[0] <= s2_vec;
                                 fifo_count <= 2'd1;
                             end else if (fifo_count == 2'd1) begin
-                                fifo_t[1] <= current_resp_out_t;
-                                fifo_ch_base[1] <= current_resp_ch_base;
-                                fifo_vec[1] <= result_vec;
+                                fifo_t[1] <= s2_t;
+                                fifo_ch_base[1] <= s2_ch_base;
+                                fifo_vec[1] <= s2_vec;
                                 fifo_count <= 2'd2;
                             end
                         end
@@ -340,14 +352,14 @@ module dw_conv2_4ch_5tap #(
                                 fifo_t[0] <= fifo_t[1];
                                 fifo_ch_base[0] <= fifo_ch_base[1];
                                 fifo_vec[0] <= fifo_vec[1];
-                                fifo_t[1] <= current_resp_out_t;
-                                fifo_ch_base[1] <= current_resp_ch_base;
-                                fifo_vec[1] <= result_vec;
+                                fifo_t[1] <= s2_t;
+                                fifo_ch_base[1] <= s2_ch_base;
+                                fifo_vec[1] <= s2_vec;
                                 fifo_count <= 2'd2;
                             end else begin
-                                fifo_t[0] <= current_resp_out_t;
-                                fifo_ch_base[0] <= current_resp_ch_base;
-                                fifo_vec[0] <= result_vec;
+                                fifo_t[0] <= s2_t;
+                                fifo_ch_base[0] <= s2_ch_base;
+                                fifo_vec[0] <= s2_vec;
                                 fifo_count <= 2'd1;
                             end
                         end
@@ -357,10 +369,55 @@ module dw_conv2_4ch_5tap #(
                         end
                     endcase
 
+                    if (pipe_advance) begin
+                        s2_valid <= s1_valid;
+                        s2_t <= s1_t;
+                        s2_ch_base <= s1_ch_base;
+                        for (pipe_lane = 0; pipe_lane < P_CH; pipe_lane = pipe_lane + 1) begin
+                            pipe_acc = {ACC_W{1'b0}};
+                            for (pipe_tap = 0; pipe_tap < K; pipe_tap = pipe_tap + 1) begin
+                                pipe_acc = pipe_acc + $signed({
+                                    {(ACC_W-32){s1_p[pipe_tap][pipe_lane][31]}},
+                                    s1_p[pipe_tap][pipe_lane]
+                                });
+                            end
+                            s2_vec[pipe_lane*DATA_W +: DATA_W]
+                                <= sat_q8_8_from_acc_shift(pipe_acc);
+                        end
+
+                        s1_valid <= s0_valid;
+                        s1_t <= s0_t;
+                        s1_ch_base <= s0_ch_base;
+                        for (pipe_tap = 0; pipe_tap < K; pipe_tap = pipe_tap + 1) begin
+                            for (pipe_lane = 0; pipe_lane < P_CH; pipe_lane = pipe_lane + 1) begin
+                                s1_p[pipe_tap][pipe_lane]
+                                    <= $signed(s0_x[pipe_tap][pipe_lane])
+                                     * $signed(s0_w[pipe_tap][pipe_lane]);
+                            end
+                        end
+
+                        s0_valid <= win_vec_fire;
+                        if (win_vec_fire) begin
+                            s0_t <= current_resp_out_t;
+                            s0_ch_base <= current_resp_ch_base;
+                            for (pipe_tap = 0; pipe_tap < K; pipe_tap = pipe_tap + 1) begin
+                                for (pipe_lane = 0; pipe_lane < P_CH; pipe_lane = pipe_lane + 1) begin
+                                    s0_x[pipe_tap][pipe_lane]
+                                        <= win_vec[(pipe_tap*P_CH + pipe_lane)*DATA_W +: DATA_W];
+                                    s0_w[pipe_tap][pipe_lane]
+                                        <= weight_mem[(current_resp_ch_base + pipe_lane)*K + pipe_tap];
+                                end
+                            end
+                        end
+                    end
+
                     if (((job_out_count == 0)
                         || ((req_group_idx == CH_GROUPS_PER_JOB)
                             && (resp_group_idx == CH_GROUPS_PER_JOB)))
                         && !outstanding
+                        && !s0_valid
+                        && !s1_valid
+                        && !s2_valid
                         && (fifo_count == 2'd0)) begin
                         busy <= 1'b0;
                         done <= 1'b1;
@@ -372,6 +429,9 @@ module dw_conv2_4ch_5tap #(
                     state <= STATE_IDLE;
                     busy <= 1'b0;
                     fifo_count <= 2'd0;
+                    s0_valid <= 1'b0;
+                    s1_valid <= 1'b0;
+                    s2_valid <= 1'b0;
                 end
             endcase
         end

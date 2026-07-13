@@ -4,46 +4,13 @@
 `define PROJECT_ROOT "D:/Intership"
 `endif
 
-// LightCNN1D PW2 pointwise Conv1d 4x12 output-stationary systolic tile.
+// PW2 pointwise Conv1d tile wrapper.
 //
-// One start pulse computes all PW2 output-channel groups for one low-resolution
-// input time tile:
-//   input:  4 low-resolution DW2 rows x 64 channels
-//   output: 4 low-resolution PW2 rows x 96 channels
-//
-// The 4x12 array is reused internally for all eight output-channel groups:
-//   oc_base = 0, 12, 24, ..., 84
-// For each group the module accumulates the post-BN/ReLU result directly into
-// GAP sums:
-//   gap_sum[oc_base + col] += post_relu[row][col] for each valid row
-//
-// The module requests a precise input tile before issuing activation/weight
-// requests. input_tile_req_ready must mean the upstream dw2_to_pw2 row packer
-// has the requested rows, all 64 channels valid for each asserted row in
-// row_valid_mask, and can keep them readable while this job runs.
-//
-// Runtime activation and weight access are request/response streams:
-//   act_vec    = {A[tile_t_base+3][k], ..., A[tile_t_base+0][k]}
-//   weight_vec = {W[oc_base+11][k], ..., W[oc_base+0][k]}
-// Requests for the same k may be accepted in different cycles. req_k advances
-// only after both sides have accepted that k. Response streams must return
-// exactly one vector per accepted request, in request order.
-//
-// Fused compute order:
-//   PW2 conv -> folded BN -> ReLU
-//
-// row_valid_mask supports the final partial low-resolution tile. For normal
-// tiles it should be 4'b1111. For the default 174-row stream, the final partial
-// tile at tile_t_base=172 should use 4'b0011. Invalid rows are not accumulated.
-//
-// Deprecated debug tile stream, kept as interface reference only:
-//   input  wire out_ready
-//   output reg  out_valid
-//   output reg  [TIME_W-1:0] out_tile_t_base
-//   output reg  [6:0] out_tile_oc_base
-//   output reg  [ROWS-1:0] out_row_valid_mask
-//   output reg  out_last_group
-//   output reg  signed [ROWS*OC_LANES*DATA_W-1:0] out_tile
+// This module is the integration boundary for the PW2 layer. The compute core
+// lives in pw_conv2_array_4x12_compute. Fixed pointwise weights are supplied by
+// the local generated blk_mem_gen_pw_conv2_weight ROM through
+// pw_conv2_weight_controller_with_rom. Runtime activations still arrive from
+// the upstream DW2-to-PW2 row packer as request/response vectors.
 
 module pw_conv2_array_4x12 #(
     parameter integer DATA_W     = 16,
@@ -55,6 +22,9 @@ module pw_conv2_array_4x12 #(
     parameter integer GAP_LEN    = 174,
     parameter integer FRAC_BITS  = 8,
     parameter integer TIME_W     = 8,
+    parameter integer BRAM_READ_LATENCY = 1,
+    parameter integer ADDR_W     = (((PW2_OC / OC_LANES) * PW2_IC) <= 1)
+        ? 1 : $clog2((PW2_OC / OC_LANES) * PW2_IC),
     parameter BN_SCALE_INIT_FILE = {`PROJECT_ROOT, "/weight_data/pw2/bn_scale.mem"},
     parameter BN_BIAS_INIT_FILE  = {`PROJECT_ROOT, "/weight_data/pw2/bn_bias.mem"}
 ) (
@@ -70,14 +40,6 @@ module pw_conv2_array_4x12 #(
     output wire [TIME_W-1:0] input_tile_req_t_base,
     output wire [ROWS-1:0] input_tile_req_row_valid_mask,
     input  wire input_tile_req_ready,
-
-    output wire weight_req_valid,
-    output wire [6:0] weight_req_oc_base,
-    output wire [6:0] weight_req_k,
-    input  wire weight_req_ready,
-    input  wire weight_vec_valid,
-    output wire weight_vec_ready,
-    input  wire signed [OC_LANES*DATA_W-1:0] weight_vec,
 
     output wire act_req_valid,
     output wire [TIME_W-1:0] act_req_t_base,
@@ -96,538 +58,89 @@ module pw_conv2_array_4x12 #(
     input  wire [6:0] bias_fold_oc,
     input  wire signed [DATA_W-1:0] bias_fold_wdata,
 
-    output reg busy,
-    output reg done,
-    output reg gap_frame_done,
-    output reg [8:0] gap_count,
+    output wire busy,
+    output wire done,
+    output wire gap_frame_done,
+    output wire [8:0] gap_count,
     output wire signed [PW2_OC*ACC_W-1:0] gap_sum_vec
 );
 
-    localparam integer FLUSH_CYCLES = ROWS + OC_LANES - 2;
-    localparam integer REQ_W        = (PW2_IC <= 1) ? 1 : $clog2(PW2_IC + 1);
-    localparam integer DRAIN_W      = (FLUSH_CYCLES <= 1) ? 1 : $clog2(FLUSH_CYCLES + 1);
-    localparam [8:0] GAP_TARGET     = GAP_LEN[8:0];
+    wire weight_req_valid;
+    wire [6:0] weight_req_oc_base;
+    wire [6:0] weight_req_k;
+    wire weight_req_ready;
+    wire weight_vec_valid;
+    wire weight_vec_ready;
+    wire signed [OC_LANES*DATA_W-1:0] weight_vec;
 
-    localparam [2:0] STATE_IDLE  = 3'd0;
-    localparam [2:0] STATE_WAIT  = 3'd1;
-    localparam [2:0] STATE_MAC   = 3'd2;
-    localparam [2:0] STATE_POST0 = 3'd3;
-    localparam [2:0] STATE_POST1 = 3'd4;
-    localparam [2:0] STATE_ACCUM = 3'd5;
-    localparam [2:0] STATE_CLEAR = 3'd6;
+    pw_conv2_array_4x12_compute #(
+        .DATA_W(DATA_W),
+        .ACC_W(ACC_W),
+        .ROWS(ROWS),
+        .OC_LANES(OC_LANES),
+        .PW2_IC(PW2_IC),
+        .PW2_OC(PW2_OC),
+        .GAP_LEN(GAP_LEN),
+        .FRAC_BITS(FRAC_BITS),
+        .TIME_W(TIME_W),
+        .BN_SCALE_INIT_FILE(BN_SCALE_INIT_FILE),
+        .BN_BIAS_INIT_FILE(BN_BIAS_INIT_FILE)
+    ) u_compute (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(start),
+        .gap_clear(gap_clear),
+        .tile_t_base(tile_t_base),
+        .row_valid_mask(row_valid_mask),
+        .input_tile_req_valid(input_tile_req_valid),
+        .input_tile_req_t_base(input_tile_req_t_base),
+        .input_tile_req_row_valid_mask(input_tile_req_row_valid_mask),
+        .input_tile_req_ready(input_tile_req_ready),
+        .weight_req_valid(weight_req_valid),
+        .weight_req_oc_base(weight_req_oc_base),
+        .weight_req_k(weight_req_k),
+        .weight_req_ready(weight_req_ready),
+        .weight_vec_valid(weight_vec_valid),
+        .weight_vec_ready(weight_vec_ready),
+        .weight_vec(weight_vec),
+        .act_req_valid(act_req_valid),
+        .act_req_t_base(act_req_t_base),
+        .act_req_k(act_req_k),
+        .act_req_row_valid_mask(act_req_row_valid_mask),
+        .act_req_ready(act_req_ready),
+        .act_vec_valid(act_vec_valid),
+        .act_vec_ready(act_vec_ready),
+        .act_vec(act_vec),
+        .w_fold_we(w_fold_we),
+        .w_fold_oc(w_fold_oc),
+        .w_fold_wdata(w_fold_wdata),
+        .bias_fold_we(bias_fold_we),
+        .bias_fold_oc(bias_fold_oc),
+        .bias_fold_wdata(bias_fold_wdata),
+        .busy(busy),
+        .done(done),
+        .gap_frame_done(gap_frame_done),
+        .gap_count(gap_count),
+        .gap_sum_vec(gap_sum_vec)
+    );
 
-    reg [2:0] state;
-    reg [6:0] oc_base_reg;
-    reg [TIME_W-1:0] tile_t_base_reg;
-    reg [ROWS-1:0] row_valid_mask_reg;
-    reg [REQ_W-1:0] req_k;
-    reg [REQ_W-1:0] recv_k;
-    reg [DRAIN_W-1:0] drain_count;
-    reg weight_req_sent;
-    reg act_req_sent;
-
-    reg weight_hold_valid;
-    reg signed [OC_LANES*DATA_W-1:0] weight_hold_data;
-    reg act_hold_valid;
-    reg signed [ROWS*DATA_W-1:0] act_hold_data;
-
-    reg signed [DATA_W-1:0] w_fold_mem [0:PW2_OC-1];
-    reg signed [DATA_W-1:0] bias_fold_mem [0:PW2_OC-1];
-
-    initial begin
-        $readmemh(BN_SCALE_INIT_FILE, w_fold_mem);
-        $readmemh(BN_BIAS_INIT_FILE, bias_fold_mem);
-    end
-
-    reg signed [ACC_W-1:0] gap_sum_mem [0:PW2_OC-1];
-
-    reg signed [DATA_W-1:0] a_delay [0:ROWS-1][0:ROWS-1];
-    reg signed [DATA_W-1:0] w_delay [0:OC_LANES-1][0:OC_LANES-1];
-    reg signed [ACC_W-1:0] gap_acc_next;
-
-    wire [6:0] oc_index [0:OC_LANES-1];
-    wire signed [DATA_W-1:0] raw_a [0:ROWS-1];
-    wire signed [DATA_W-1:0] raw_w [0:OC_LANES-1];
-    wire signed [DATA_W-1:0] a_left [0:ROWS-1];
-    wire signed [DATA_W-1:0] w_top [0:OC_LANES-1];
-
-    wire signed [DATA_W-1:0] a_bus [0:ROWS-1][0:OC_LANES];
-    wire signed [DATA_W-1:0] w_bus [0:ROWS][0:OC_LANES-1];
-    wire signed [DATA_W-1:0] post_bus [0:ROWS-1][0:OC_LANES-1];
-
-    wire request_pending;
-    wire weight_req_fire;
-    wire act_req_fire;
-    wire request_pair_done;
-    wire can_accept_resp;
-    wire weight_vec_fire;
-    wire act_vec_fire;
-    wire weight_avail;
-    wire act_avail;
-    wire feed_valid;
-    wire flush_valid;
-    wire mac_step_en;
-    wire pe_clear;
-    wire pe_mac_en;
-    wire pe_post0_en;
-    wire pe_post1_en;
-    wire bn_write_en;
-    wire input_tile_req_fire;
-    wire last_oc_group;
-    wire signed [OC_LANES*DATA_W-1:0] feed_weight_vec;
-    wire signed [ROWS*DATA_W-1:0] feed_act_vec;
-
-    integer i;
-    integer j;
-    integer s;
-    integer g;
-
-    assign request_pending = (state == STATE_MAC) && (req_k < PW2_IC);
-
-    assign weight_req_valid = request_pending && !weight_req_sent;
-    assign weight_req_oc_base = oc_base_reg;
-    assign weight_req_k = req_k[6:0];
-
-    assign act_req_valid = request_pending && !act_req_sent;
-    assign act_req_t_base = tile_t_base_reg;
-    assign act_req_k = req_k[6:0];
-    assign act_req_row_valid_mask = row_valid_mask_reg;
-
-    assign weight_req_fire = weight_req_valid && weight_req_ready;
-    assign act_req_fire = act_req_valid && act_req_ready;
-    assign request_pair_done = request_pending
-        && (weight_req_sent || weight_req_fire)
-        && (act_req_sent || act_req_fire);
-
-    assign can_accept_resp = (state == STATE_MAC) && (recv_k < PW2_IC);
-    assign weight_vec_ready = can_accept_resp && !weight_hold_valid;
-    assign act_vec_ready = can_accept_resp && !act_hold_valid;
-    assign weight_vec_fire = weight_vec_valid && weight_vec_ready;
-    assign act_vec_fire = act_vec_valid && act_vec_ready;
-    assign weight_avail = weight_hold_valid || weight_vec_fire;
-    assign act_avail = act_hold_valid || act_vec_fire;
-    assign feed_valid = can_accept_resp && weight_avail && act_avail;
-    assign flush_valid = (state == STATE_MAC) && (recv_k == PW2_IC);
-    assign mac_step_en = feed_valid || flush_valid;
-
-    assign feed_weight_vec = weight_hold_valid ? weight_hold_data : weight_vec;
-    assign feed_act_vec = act_hold_valid ? act_hold_data : act_vec;
-
-    assign input_tile_req_valid = ((state == STATE_IDLE) && start)
-        || (state == STATE_WAIT);
-    assign input_tile_req_t_base = ((state == STATE_IDLE) && start)
-        ? tile_t_base
-        : tile_t_base_reg;
-    assign input_tile_req_row_valid_mask = ((state == STATE_IDLE) && start)
-        ? row_valid_mask
-        : row_valid_mask_reg;
-    assign input_tile_req_fire = input_tile_req_valid && input_tile_req_ready;
-
-    assign last_oc_group = (oc_base_reg == (PW2_OC - OC_LANES));
-
-    assign pe_clear = input_tile_req_fire || (state == STATE_CLEAR);
-    assign pe_mac_en = mac_step_en;
-    assign pe_post0_en = (state == STATE_POST0);
-    assign pe_post1_en = (state == STATE_POST1);
-    assign bn_write_en = (state == STATE_IDLE) && !start;
-
-    genvar gs;
-    generate
-        for (gs = 0; gs < PW2_OC; gs = gs + 1) begin : GEN_GAP_SUM_VEC
-            assign gap_sum_vec[gs*ACC_W +: ACC_W] = gap_sum_mem[gs];
-        end
-    endgenerate
-
-    function [8:0] valid_row_count;
-        input [ROWS-1:0] mask;
-        integer idx;
-        begin
-            valid_row_count = 9'd0;
-            for (idx = 0; idx < ROWS; idx = idx + 1) begin
-                if (mask[idx]) begin
-                    valid_row_count = valid_row_count + 9'd1;
-                end
-            end
-        end
-    endfunction
-
-    genvar gc;
-    generate
-        for (gc = 0; gc < OC_LANES; gc = gc + 1) begin : GEN_OC_INDEX
-            assign oc_index[gc] = oc_base_reg + gc[6:0];
-            assign raw_w[gc] = feed_valid
-                ? feed_weight_vec[gc*DATA_W +: DATA_W]
-                : {DATA_W{1'b0}};
-            assign w_top[gc] = (gc == 0) ? raw_w[gc] : w_delay[gc][gc-1];
-            assign w_bus[0][gc] = w_top[gc];
-        end
-    endgenerate
-
-    genvar gr;
-    generate
-        for (gr = 0; gr < ROWS; gr = gr + 1) begin : GEN_A_LEFT
-            assign raw_a[gr] = (feed_valid && row_valid_mask_reg[gr])
-                ? feed_act_vec[gr*DATA_W +: DATA_W]
-                : {DATA_W{1'b0}};
-            assign a_left[gr] = (gr == 0) ? raw_a[gr] : a_delay[gr][gr-1];
-            assign a_bus[gr][0] = a_left[gr];
-        end
-    endgenerate
-
-    genvar pr;
-    genvar pc;
-    generate
-        for (pr = 0; pr < ROWS; pr = pr + 1) begin : GEN_PE_ROW
-            for (pc = 0; pc < OC_LANES; pc = pc + 1) begin : GEN_PE_COL
-                pw_conv2_systolic_pe #(
-                    .DATA_W(DATA_W),
-                    .ACC_W(ACC_W),
-                    .FRAC_BITS(FRAC_BITS)
-                ) u_pe (
-                    .clk(clk),
-                    .rst_n(rst_n),
-                    .clear(pe_clear),
-                    .mac_en(pe_mac_en),
-                    .post0_en(pe_post0_en),
-                    .post1_en(pe_post1_en),
-                    .a_in(a_bus[pr][pc]),
-                    .w_in(w_bus[pr][pc]),
-                    .bn_scale(w_fold_mem[oc_index[pc]]),
-                    .bn_bias(bias_fold_mem[oc_index[pc]]),
-                    .a_out(a_bus[pr][pc+1]),
-                    .w_out(w_bus[pr+1][pc]),
-                    .post_out(post_bus[pr][pc])
-                );
-            end
-        end
-    endgenerate
-
-    always @(posedge clk) begin
-        if (bn_write_en && w_fold_we) begin
-            w_fold_mem[w_fold_oc] <= w_fold_wdata;
-        end
-        if (bn_write_en && bias_fold_we) begin
-            bias_fold_mem[bias_fold_oc] <= bias_fold_wdata;
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            weight_hold_valid <= 1'b0;
-            weight_hold_data <= {(OC_LANES*DATA_W){1'b0}};
-            act_hold_valid <= 1'b0;
-            act_hold_data <= {(ROWS*DATA_W){1'b0}};
-        end else if (pe_clear || (state != STATE_MAC)) begin
-            weight_hold_valid <= 1'b0;
-            weight_hold_data <= {(OC_LANES*DATA_W){1'b0}};
-            act_hold_valid <= 1'b0;
-            act_hold_data <= {(ROWS*DATA_W){1'b0}};
-        end else if (feed_valid) begin
-            weight_hold_valid <= 1'b0;
-            weight_hold_data <= {(OC_LANES*DATA_W){1'b0}};
-            act_hold_valid <= 1'b0;
-            act_hold_data <= {(ROWS*DATA_W){1'b0}};
-        end else begin
-            if (weight_vec_fire) begin
-                weight_hold_valid <= 1'b1;
-                weight_hold_data <= weight_vec;
-            end
-            if (act_vec_fire) begin
-                act_hold_valid <= 1'b1;
-                act_hold_data <= act_vec;
-            end
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (i = 0; i < ROWS; i = i + 1) begin
-                for (s = 0; s < ROWS; s = s + 1) begin
-                    a_delay[i][s] <= {DATA_W{1'b0}};
-                end
-            end
-            for (j = 0; j < OC_LANES; j = j + 1) begin
-                for (s = 0; s < OC_LANES; s = s + 1) begin
-                    w_delay[j][s] <= {DATA_W{1'b0}};
-                end
-            end
-        end else if (pe_clear) begin
-            for (i = 0; i < ROWS; i = i + 1) begin
-                for (s = 0; s < ROWS; s = s + 1) begin
-                    a_delay[i][s] <= {DATA_W{1'b0}};
-                end
-            end
-            for (j = 0; j < OC_LANES; j = j + 1) begin
-                for (s = 0; s < OC_LANES; s = s + 1) begin
-                    w_delay[j][s] <= {DATA_W{1'b0}};
-                end
-            end
-        end else if (mac_step_en) begin
-            for (i = 0; i < ROWS; i = i + 1) begin
-                a_delay[i][0] <= raw_a[i];
-                for (s = 1; s < ROWS; s = s + 1) begin
-                    a_delay[i][s] <= a_delay[i][s-1];
-                end
-            end
-            for (j = 0; j < OC_LANES; j = j + 1) begin
-                w_delay[j][0] <= raw_w[j];
-                for (s = 1; s < OC_LANES; s = s + 1) begin
-                    w_delay[j][s] <= w_delay[j][s-1];
-                end
-            end
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            state <= STATE_IDLE;
-            oc_base_reg <= 7'd0;
-            tile_t_base_reg <= {TIME_W{1'b0}};
-            row_valid_mask_reg <= {ROWS{1'b0}};
-            req_k <= {REQ_W{1'b0}};
-            recv_k <= {REQ_W{1'b0}};
-            drain_count <= {DRAIN_W{1'b0}};
-            weight_req_sent <= 1'b0;
-            act_req_sent <= 1'b0;
-            busy <= 1'b0;
-            done <= 1'b0;
-            gap_frame_done <= 1'b0;
-            gap_count <= 9'd0;
-            for (g = 0; g < PW2_OC; g = g + 1) begin
-                gap_sum_mem[g] <= {ACC_W{1'b0}};
-            end
-        end else if (gap_clear) begin
-            state <= STATE_IDLE;
-            oc_base_reg <= 7'd0;
-            tile_t_base_reg <= {TIME_W{1'b0}};
-            row_valid_mask_reg <= {ROWS{1'b0}};
-            req_k <= {REQ_W{1'b0}};
-            recv_k <= {REQ_W{1'b0}};
-            drain_count <= {DRAIN_W{1'b0}};
-            weight_req_sent <= 1'b0;
-            act_req_sent <= 1'b0;
-            busy <= 1'b0;
-            done <= 1'b0;
-            gap_frame_done <= 1'b0;
-            gap_count <= 9'd0;
-            for (g = 0; g < PW2_OC; g = g + 1) begin
-                gap_sum_mem[g] <= {ACC_W{1'b0}};
-            end
-        end else begin
-            done <= 1'b0;
-
-            case (state)
-                STATE_IDLE: begin
-                    busy <= 1'b0;
-                    gap_frame_done <= 1'b0;
-                    req_k <= {REQ_W{1'b0}};
-                    recv_k <= {REQ_W{1'b0}};
-                    drain_count <= {DRAIN_W{1'b0}};
-                    weight_req_sent <= 1'b0;
-                    act_req_sent <= 1'b0;
-                    if (start) begin
-                        busy <= 1'b1;
-                        oc_base_reg <= 7'd0;
-                        tile_t_base_reg <= tile_t_base;
-                        row_valid_mask_reg <= row_valid_mask;
-                        state <= input_tile_req_ready ? STATE_MAC : STATE_WAIT;
-                    end
-                end
-
-                STATE_WAIT: begin
-                    busy <= 1'b1;
-                    if (input_tile_req_ready) begin
-                        state <= STATE_MAC;
-                    end
-                end
-
-                STATE_CLEAR: begin
-                    busy <= 1'b1;
-                    req_k <= {REQ_W{1'b0}};
-                    recv_k <= {REQ_W{1'b0}};
-                    drain_count <= {DRAIN_W{1'b0}};
-                    weight_req_sent <= 1'b0;
-                    act_req_sent <= 1'b0;
-                    state <= STATE_MAC;
-                end
-
-                STATE_MAC: begin
-                    busy <= 1'b1;
-                    if (request_pair_done) begin
-                        req_k <= req_k + 1'b1;
-                        weight_req_sent <= 1'b0;
-                        act_req_sent <= 1'b0;
-                    end else begin
-                        if (weight_req_fire) begin
-                            weight_req_sent <= 1'b1;
-                        end
-                        if (act_req_fire) begin
-                            act_req_sent <= 1'b1;
-                        end
-                    end
-
-                    if (feed_valid) begin
-                        recv_k <= recv_k + 1'b1;
-                    end else if (flush_valid) begin
-                        if (drain_count == FLUSH_CYCLES-1) begin
-                            drain_count <= {DRAIN_W{1'b0}};
-                            state <= STATE_POST0;
-                        end else begin
-                            drain_count <= drain_count + 1'b1;
-                        end
-                    end
-                end
-
-                STATE_POST0: begin
-                    state <= STATE_POST1;
-                end
-
-                STATE_POST1: begin
-                    state <= STATE_ACCUM;
-                end
-
-                STATE_ACCUM: begin
-                    busy <= 1'b1;
-                    for (j = 0; j < OC_LANES; j = j + 1) begin
-                        gap_acc_next = gap_sum_mem[oc_base_reg + j[6:0]];
-                        for (i = 0; i < ROWS; i = i + 1) begin
-                            if (row_valid_mask_reg[i]) begin
-                                gap_acc_next = gap_acc_next
-                                    + $signed({{(ACC_W-DATA_W){post_bus[i][j][DATA_W-1]}},
-                                        post_bus[i][j]});
-                            end
-                        end
-                        gap_sum_mem[oc_base_reg + j[6:0]] <= gap_acc_next;
-                    end
-
-                    if (last_oc_group) begin
-                        gap_count <= gap_count + valid_row_count(row_valid_mask_reg);
-                        gap_frame_done <= (
-                            gap_count + valid_row_count(row_valid_mask_reg)
-                        ) == GAP_TARGET;
-                        done <= 1'b1;
-                        busy <= 1'b0;
-                        state <= STATE_IDLE;
-                    end else begin
-                        oc_base_reg <= oc_base_reg + OC_LANES[6:0];
-                        state <= STATE_CLEAR;
-                    end
-                end
-
-                default: begin
-                    state <= STATE_IDLE;
-                    busy <= 1'b0;
-                end
-            endcase
-        end
-    end
-
-endmodule
-
-module pw_conv2_systolic_pe #(
-    parameter integer DATA_W    = 16,
-    parameter integer ACC_W     = 48,
-    parameter integer FRAC_BITS = 8
-) (
-    input  wire clk,
-    input  wire rst_n,
-    input  wire clear,
-    input  wire mac_en,
-    input  wire post0_en,
-    input  wire post1_en,
-
-    input  wire signed [DATA_W-1:0] a_in,
-    input  wire signed [DATA_W-1:0] w_in,
-    input  wire signed [DATA_W-1:0] bn_scale,
-    input  wire signed [DATA_W-1:0] bn_bias,
-
-    output reg signed [DATA_W-1:0] a_out,
-    output reg signed [DATA_W-1:0] w_out,
-    output reg signed [DATA_W-1:0] post_out
-);
-
-    reg signed [ACC_W-1:0] acc;
-    reg signed [31:0] bn_mul;
-
-    wire signed [DATA_W-1:0] conv_q;
-    wire signed [DATA_W-1:0] mul_a;
-    wire signed [DATA_W-1:0] mul_b;
-    (* use_dsp = "yes" *) wire signed [31:0] mul_p;
-
-    reg signed [31:0] post_shifted;
-    reg signed [31:0] post_biased;
-    reg signed [DATA_W-1:0] bn_q;
-
-    assign conv_q = sat_q8_8_from_acc_shift(acc);
-    assign mul_a = post0_en ? conv_q : a_in;
-    assign mul_b = post0_en ? bn_scale : w_in;
-    assign mul_p = $signed(mul_a) * $signed(mul_b);
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            acc <= {ACC_W{1'b0}};
-            bn_mul <= 32'sd0;
-            post_shifted <= 32'sd0;
-            post_biased <= 32'sd0;
-            bn_q <= {DATA_W{1'b0}};
-            a_out <= {DATA_W{1'b0}};
-            w_out <= {DATA_W{1'b0}};
-            post_out <= {DATA_W{1'b0}};
-        end else if (clear) begin
-            acc <= {ACC_W{1'b0}};
-            bn_mul <= 32'sd0;
-            post_shifted <= 32'sd0;
-            post_biased <= 32'sd0;
-            bn_q <= {DATA_W{1'b0}};
-            a_out <= {DATA_W{1'b0}};
-            w_out <= {DATA_W{1'b0}};
-            post_out <= {DATA_W{1'b0}};
-        end else begin
-            if (mac_en) begin
-                acc <= acc + $signed({{(ACC_W-32){mul_p[31]}}, mul_p});
-                a_out <= a_in;
-                w_out <= w_in;
-            end
-
-            if (post0_en) begin
-                bn_mul <= mul_p;
-            end
-
-            if (post1_en) begin
-                post_shifted = bn_mul >>> FRAC_BITS;
-                post_biased = post_shifted + $signed({{(32-DATA_W){bn_bias[DATA_W-1]}}, bn_bias});
-                bn_q = sat_q8_8_from_32(post_biased);
-                post_out <= bn_q[DATA_W-1] ? {DATA_W{1'b0}} : bn_q;
-            end
-        end
-    end
-
-    function signed [DATA_W-1:0] sat_q8_8_from_acc_shift;
-        input signed [ACC_W-1:0] value;
-        reg signed [ACC_W-1:0] shifted;
-        begin
-            shifted = value >>> FRAC_BITS;
-            if (shifted > $signed({1'b0, {(DATA_W-1){1'b1}}})) begin
-                sat_q8_8_from_acc_shift = {1'b0, {(DATA_W-1){1'b1}}};
-            end else if (shifted < $signed({1'b1, {(DATA_W-1){1'b0}}})) begin
-                sat_q8_8_from_acc_shift = {1'b1, {(DATA_W-1){1'b0}}};
-            end else begin
-                sat_q8_8_from_acc_shift = shifted[DATA_W-1:0];
-            end
-        end
-    endfunction
-
-    function signed [DATA_W-1:0] sat_q8_8_from_32;
-        input signed [31:0] value;
-        begin
-            if (value > $signed({1'b0, {(DATA_W-1){1'b1}}})) begin
-                sat_q8_8_from_32 = {1'b0, {(DATA_W-1){1'b1}}};
-            end else if (value < $signed({1'b1, {(DATA_W-1){1'b0}}})) begin
-                sat_q8_8_from_32 = {1'b1, {(DATA_W-1){1'b0}}};
-            end else begin
-                sat_q8_8_from_32 = value[DATA_W-1:0];
-            end
-        end
-    endfunction
+    pw_conv2_weight_controller_with_rom #(
+        .DATA_W(DATA_W),
+        .OC_LANES(OC_LANES),
+        .PW2_IC(PW2_IC),
+        .PW2_OC(PW2_OC),
+        .BRAM_READ_LATENCY(BRAM_READ_LATENCY),
+        .ADDR_W(ADDR_W)
+    ) u_weight (
+        .clk(clk),
+        .rst_n(rst_n),
+        .weight_req_valid(weight_req_valid),
+        .weight_req_oc_base(weight_req_oc_base),
+        .weight_req_k(weight_req_k),
+        .weight_req_ready(weight_req_ready),
+        .weight_vec_valid(weight_vec_valid),
+        .weight_vec_ready(weight_vec_ready),
+        .weight_vec(weight_vec)
+    );
 
 endmodule

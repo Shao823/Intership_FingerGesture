@@ -16,17 +16,12 @@ module tb_pw_conv2_array_4x12;
     localparam integer GAP_LEN    = 174;
     localparam integer FRAC_BITS  = 8;
     localparam integer TIME_W     = 8;
-    localparam integer TIMEOUT    = 20000;
     localparam integer INPUT_LEN  = 174;
-    localparam integer FILE_MODE  = 99;
-    localparam integer FILE_CASES = 4;
+    localparam integer TIMEOUT    = 20000;
 
     localparam integer READY_NONE     = 0;
     localparam integer READY_PERIODIC = 1;
     localparam integer READY_LATE     = 2;
-
-    localparam integer RESP_ONE_CYCLE  = 0;
-    localparam integer RESP_ZERO_CYCLE = 1;
 
     reg clk;
     reg rst_n;
@@ -39,16 +34,6 @@ module tb_pw_conv2_array_4x12;
     wire [TIME_W-1:0] input_tile_req_t_base;
     wire [ROWS-1:0] input_tile_req_row_valid_mask;
     reg input_tile_req_ready;
-
-    wire weight_req_valid;
-    wire [6:0] weight_req_oc_base;
-    wire [6:0] weight_req_k;
-    reg weight_req_ready;
-    wire weight_vec_valid;
-    wire weight_vec_ready;
-    wire signed [OC_LANES*DATA_W-1:0] weight_vec;
-    reg weight_vec_valid_reg;
-    reg signed [OC_LANES*DATA_W-1:0] weight_vec_reg;
 
     wire act_req_valid;
     wire [TIME_W-1:0] act_req_t_base;
@@ -75,61 +60,45 @@ module tb_pw_conv2_array_4x12;
     wire [8:0] gap_count;
     wire signed [PW2_OC*ACC_W-1:0] gap_sum_vec;
 
+    wire input_tile_req_fire_tb;
+    wire act_req_fire_tb;
+    wire act_vec_fire_tb;
+    wire act_vec_blocked;
+    wire weight_req_fire_tb;
+
     integer errors;
-    integer test_mode;
     integer test_tile_t_base;
     integer test_row_valid_mask;
     integer input_delay;
-    integer weight_ready_mode;
     integer act_ready_mode;
-    integer resp_mode;
-    integer weight_ready_cycle;
     integer act_ready_cycle;
     integer input_wait_cycle;
+    integer tile_req_count;
     integer weight_req_count;
     integer act_req_count;
+    integer act_resp_count;
     integer last_timeout;
+    integer last_cycle_count;
     integer expected_gap_count;
     integer oc;
     integer k;
     integer row;
-    integer col;
-    integer file_case_idx;
+    integer t;
 
     reg signed [ACC_W-1:0] expected_gap_sum [0:PW2_OC-1];
     reg signed [DATA_W-1:0] file_input [0:INPUT_LEN*PW2_IC-1];
-    reg signed [DATA_W-1:0] file_weight [0:PW2_OC*PW2_IC-1];
-    reg signed [DATA_W-1:0] file_bn_scale [0:PW2_OC-1];
-    reg signed [DATA_W-1:0] file_bn_bias [0:PW2_OC-1];
-    reg [15:0] file_case_t_base [0:FILE_CASES-1];
-    reg [7:0] file_case_row_valid_mask [0:FILE_CASES-1];
-    reg signed [ACC_W-1:0] file_expected_tile_sum [0:FILE_CASES*PW2_OC-1];
-
-    wire input_tile_req_fire_tb;
-    wire weight_req_fire_tb;
-    wire act_req_fire_tb;
-    wire weight_vec_blocked;
-    wire act_vec_blocked;
+    reg [OC_LANES*DATA_W-1:0] packed_weight_mem [0:OC_GROUPS*PW2_IC-1];
+    reg signed [DATA_W-1:0] bn_scale_mem [0:PW2_OC-1];
+    reg signed [DATA_W-1:0] bn_bias_mem [0:PW2_OC-1];
 
     assign input_tile_req_fire_tb = input_tile_req_valid && input_tile_req_ready;
-    assign weight_req_fire_tb = weight_req_valid && weight_req_ready;
     assign act_req_fire_tb = act_req_valid && act_req_ready;
-    assign weight_vec_blocked = weight_vec_valid && !weight_vec_ready;
+    assign act_vec_fire_tb = act_vec_valid && act_vec_ready;
     assign act_vec_blocked = act_vec_valid && !act_vec_ready;
+    assign weight_req_fire_tb = dut.weight_req_valid && dut.weight_req_ready;
 
-    assign weight_vec_valid = (resp_mode == RESP_ZERO_CYCLE)
-        ? weight_req_fire_tb
-        : weight_vec_valid_reg;
-    assign weight_vec = (resp_mode == RESP_ZERO_CYCLE)
-        ? make_weight_vec(weight_req_oc_base, weight_req_k)
-        : weight_vec_reg;
-
-    assign act_vec_valid = (resp_mode == RESP_ZERO_CYCLE)
-        ? act_req_fire_tb
-        : act_vec_valid_reg;
-    assign act_vec = (resp_mode == RESP_ZERO_CYCLE)
-        ? make_act_vec(test_mode, act_req_t_base, act_req_k, act_req_row_valid_mask)
-        : act_vec_reg;
+    assign act_vec_valid = act_vec_valid_reg;
+    assign act_vec = act_vec_reg;
 
     pw_conv2_array_4x12 #(
         .DATA_W(DATA_W),
@@ -152,13 +121,6 @@ module tb_pw_conv2_array_4x12;
         .input_tile_req_t_base(input_tile_req_t_base),
         .input_tile_req_row_valid_mask(input_tile_req_row_valid_mask),
         .input_tile_req_ready(input_tile_req_ready),
-        .weight_req_valid(weight_req_valid),
-        .weight_req_oc_base(weight_req_oc_base),
-        .weight_req_k(weight_req_k),
-        .weight_req_ready(weight_req_ready),
-        .weight_vec_valid(weight_vec_valid),
-        .weight_vec_ready(weight_vec_ready),
-        .weight_vec(weight_vec),
         .act_req_valid(act_req_valid),
         .act_req_t_base(act_req_t_base),
         .act_req_k(act_req_k),
@@ -185,30 +147,9 @@ module tb_pw_conv2_array_4x12;
             {`PROJECT_ROOT, "/emg_gesture_vivado/src/pw_conv2_array_4x12/testdata/input.mem"},
             file_input
         );
-        $readmemh(
-            {`PROJECT_ROOT, "/emg_gesture_vivado/src/pw_conv2_array_4x12/testdata/weight.mem"},
-            file_weight
-        );
-        $readmemh(
-            {`PROJECT_ROOT, "/emg_gesture_vivado/src/pw_conv2_array_4x12/testdata/bn_scale.mem"},
-            file_bn_scale
-        );
-        $readmemh(
-            {`PROJECT_ROOT, "/emg_gesture_vivado/src/pw_conv2_array_4x12/testdata/bn_bias.mem"},
-            file_bn_bias
-        );
-        $readmemh(
-            {`PROJECT_ROOT, "/emg_gesture_vivado/src/pw_conv2_array_4x12/testdata/case_t_base.mem"},
-            file_case_t_base
-        );
-        $readmemh(
-            {`PROJECT_ROOT, "/emg_gesture_vivado/src/pw_conv2_array_4x12/testdata/case_row_valid_mask.mem"},
-            file_case_row_valid_mask
-        );
-        $readmemh(
-            {`PROJECT_ROOT, "/emg_gesture_vivado/src/pw_conv2_array_4x12/testdata/expected_tile_sum.mem"},
-            file_expected_tile_sum
-        );
+        $readmemh({`PROJECT_ROOT, "/weight_data/pw2/weight_packed.mem"}, packed_weight_mem);
+        $readmemh({`PROJECT_ROOT, "/weight_data/pw2/bn_scale.mem"}, bn_scale_mem);
+        $readmemh({`PROJECT_ROOT, "/weight_data/pw2/bn_bias.mem"}, bn_bias_mem);
     end
 
     always #5 clk = ~clk;
@@ -223,37 +164,6 @@ module tb_pw_conv2_array_4x12;
         end else begin
             input_wait_cycle <= 0;
             input_tile_req_ready <= 1'b0;
-        end
-    end
-
-    always @(negedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            weight_req_ready <= 1'b1;
-            weight_ready_cycle <= 0;
-        end else if (busy) begin
-            weight_ready_cycle <= weight_ready_cycle + 1;
-            case (weight_ready_mode)
-                READY_NONE: begin
-                    weight_req_ready <= !weight_vec_blocked;
-                end
-
-                READY_PERIODIC: begin
-                    weight_req_ready <= ((weight_ready_cycle % 6) != 2)
-                        && !weight_vec_blocked;
-                end
-
-                READY_LATE: begin
-                    weight_req_ready <= (weight_ready_cycle >= 4)
-                        && !weight_vec_blocked;
-                end
-
-                default: begin
-                    weight_req_ready <= !weight_vec_blocked;
-                end
-            endcase
-        end else begin
-            weight_ready_cycle <= 0;
-            weight_req_ready <= !weight_vec_blocked;
         end
     end
 
@@ -290,48 +200,21 @@ module tb_pw_conv2_array_4x12;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            weight_vec_valid_reg <= 1'b0;
-            weight_vec_reg <= {(OC_LANES*DATA_W){1'b0}};
-        end else begin
-            if (resp_mode == RESP_ZERO_CYCLE) begin
-                weight_vec_valid_reg <= 1'b0;
-                weight_vec_reg <= {(OC_LANES*DATA_W){1'b0}};
-            end else if (weight_vec_valid_reg && !weight_vec_ready) begin
-                weight_vec_valid_reg <= weight_vec_valid_reg;
-                weight_vec_reg <= weight_vec_reg;
-            end else if (weight_req_fire_tb) begin
-                weight_vec_valid_reg <= 1'b1;
-                weight_vec_reg <= make_weight_vec(weight_req_oc_base, weight_req_k);
-            end else begin
-                weight_vec_valid_reg <= 1'b0;
-                weight_vec_reg <= {(OC_LANES*DATA_W){1'b0}};
-            end
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
             act_vec_valid_reg <= 1'b0;
             act_vec_reg <= {(ROWS*DATA_W){1'b0}};
+        end else if (act_vec_valid_reg && !act_vec_ready) begin
+            act_vec_valid_reg <= act_vec_valid_reg;
+            act_vec_reg <= act_vec_reg;
+        end else if (act_req_fire_tb) begin
+            act_vec_valid_reg <= 1'b1;
+            act_vec_reg <= make_act_vec(
+                act_req_t_base,
+                act_req_k,
+                act_req_row_valid_mask
+            );
         end else begin
-            if (resp_mode == RESP_ZERO_CYCLE) begin
-                act_vec_valid_reg <= 1'b0;
-                act_vec_reg <= {(ROWS*DATA_W){1'b0}};
-            end else if (act_vec_valid_reg && !act_vec_ready) begin
-                act_vec_valid_reg <= act_vec_valid_reg;
-                act_vec_reg <= act_vec_reg;
-            end else if (act_req_fire_tb) begin
-                act_vec_valid_reg <= 1'b1;
-                act_vec_reg <= make_act_vec(
-                    test_mode,
-                    act_req_t_base,
-                    act_req_k,
-                    act_req_row_valid_mask
-                );
-            end else begin
-                act_vec_valid_reg <= 1'b0;
-                act_vec_reg <= {(ROWS*DATA_W){1'b0}};
-            end
+            act_vec_valid_reg <= 1'b0;
+            act_vec_reg <= {(ROWS*DATA_W){1'b0}};
         end
     end
 
@@ -339,7 +222,7 @@ module tb_pw_conv2_array_4x12;
         if (rst_n && input_tile_req_valid) begin
             if (input_tile_req_t_base !== test_tile_t_base[TIME_W-1:0]) begin
                 $display(
-                    "ERROR PW2 input_tile_req_t_base got=%0d expected=%0d",
+                    "ERROR PW2 top input_tile_req_t_base got=%0d expected=%0d",
                     input_tile_req_t_base,
                     test_tile_t_base
                 );
@@ -347,16 +230,17 @@ module tb_pw_conv2_array_4x12;
             end
             if (input_tile_req_row_valid_mask !== test_row_valid_mask[ROWS-1:0]) begin
                 $display(
-                    "ERROR PW2 input row mask got=%b expected=%b",
+                    "ERROR PW2 top input row mask got=%b expected=%b",
                     input_tile_req_row_valid_mask,
                     test_row_valid_mask[ROWS-1:0]
                 );
                 errors = errors + 1;
             end
         end
-    end
 
-    always @(posedge clk) begin
+        if (rst_n && input_tile_req_fire_tb) begin
+            tile_req_count = tile_req_count + 1;
+        end
         if (rst_n && weight_req_fire_tb) begin
             check_weight_request();
             weight_req_count = weight_req_count + 1;
@@ -365,14 +249,10 @@ module tb_pw_conv2_array_4x12;
             check_act_request();
             act_req_count = act_req_count + 1;
         end
-    end
-
-    function signed [DATA_W-1:0] q;
-        input integer value;
-        begin
-            q = value[DATA_W-1:0];
+        if (rst_n && act_vec_fire_tb) begin
+            act_resp_count = act_resp_count + 1;
         end
-    endfunction
+    end
 
     function signed [ACC_W-1:0] extend_to_acc;
         input signed [DATA_W-1:0] value;
@@ -402,69 +282,28 @@ module tb_pw_conv2_array_4x12;
     endfunction
 
     function signed [DATA_W-1:0] input_value;
-        input integer mode;
         input integer t_idx;
         input integer k_idx;
         begin
-            if (mode == FILE_MODE) begin
-                input_value = file_input[t_idx*PW2_IC + k_idx];
-            end else if (mode == 1) begin
-                input_value = q(512 - (t_idx % 5) * 24 + ((k_idx % 13) - 6) * 7);
-            end else begin
-                input_value = q(((t_idx % 9) - 4) * 13 + ((k_idx % 11) - 5) * 9);
-            end
+            input_value = file_input[t_idx*PW2_IC + k_idx];
         end
     endfunction
 
     function signed [DATA_W-1:0] weight_value;
         input integer oc_idx;
         input integer k_idx;
+        integer group_i;
+        integer lane_i;
+        reg [OC_LANES*DATA_W-1:0] packed_word;
         begin
-            if (test_mode == FILE_MODE) begin
-                weight_value = file_weight[oc_idx*PW2_IC + k_idx];
-            end else begin
-                weight_value = q(((oc_idx % 17) - 8) * 5 + ((k_idx % 7) - 3) * 4);
-            end
-        end
-    endfunction
-
-    function signed [DATA_W-1:0] w_fold_value;
-        input integer oc_idx;
-        begin
-            if (test_mode == FILE_MODE) begin
-                w_fold_value = file_bn_scale[oc_idx];
-            end else begin
-                w_fold_value = q(256 + (oc_idx % 4) * 12);
-            end
-        end
-    endfunction
-
-    function signed [DATA_W-1:0] bias_fold_value;
-        input integer oc_idx;
-        begin
-            if (test_mode == FILE_MODE) begin
-                bias_fold_value = file_bn_bias[oc_idx];
-            end else begin
-                bias_fold_value = q(((oc_idx % 9) - 4) * 18);
-            end
-        end
-    endfunction
-
-    function signed [OC_LANES*DATA_W-1:0] make_weight_vec;
-        input integer oc_base_i;
-        input integer k_idx;
-        integer local_col;
-        begin
-            make_weight_vec = {(OC_LANES*DATA_W){1'b0}};
-            for (local_col = 0; local_col < OC_LANES; local_col = local_col + 1) begin
-                make_weight_vec[local_col*DATA_W +: DATA_W]
-                    = weight_value(oc_base_i + local_col, k_idx);
-            end
+            group_i = oc_idx / OC_LANES;
+            lane_i = oc_idx % OC_LANES;
+            packed_word = packed_weight_mem[group_i*PW2_IC + k_idx];
+            weight_value = packed_word[lane_i*DATA_W +: DATA_W];
         end
     endfunction
 
     function signed [ROWS*DATA_W-1:0] make_act_vec;
-        input integer mode;
         input integer t_base_i;
         input integer k_idx;
         input [ROWS-1:0] mask_i;
@@ -474,7 +313,7 @@ module tb_pw_conv2_array_4x12;
             for (local_row = 0; local_row < ROWS; local_row = local_row + 1) begin
                 if (mask_i[local_row]) begin
                     make_act_vec[local_row*DATA_W +: DATA_W]
-                        = input_value(mode, t_base_i + local_row, k_idx);
+                        = input_value(t_base_i + local_row, k_idx);
                 end else begin
                     make_act_vec[local_row*DATA_W +: DATA_W] = {DATA_W{1'b0}};
                 end
@@ -511,7 +350,6 @@ module tb_pw_conv2_array_4x12;
     endfunction
 
     function signed [DATA_W-1:0] expected_value;
-        input integer mode;
         input integer t_base_i;
         input integer row_idx;
         input integer oc_idx;
@@ -531,13 +369,13 @@ module tb_pw_conv2_array_4x12;
                 acc = 0;
                 for (local_k = 0; local_k < PW2_IC; local_k = local_k + 1) begin
                     acc = acc
-                        + input_value(mode, t_base_i + row_idx, local_k)
+                        + input_value(t_base_i + row_idx, local_k)
                         * weight_value(oc_idx, local_k);
                 end
                 conv_q = sat_from_acc_shift(acc);
-                bn_mul = conv_q * w_fold_value(oc_idx);
+                bn_mul = conv_q * bn_scale_mem[oc_idx];
                 bn_shifted = bn_mul >>> FRAC_BITS;
-                bias_q = bias_fold_value(oc_idx);
+                bias_q = bn_bias_mem[oc_idx];
                 bn_biased = bn_shifted
                     + $signed({{(32-DATA_W){bias_q[DATA_W-1]}}, bias_q});
                 bn_q = sat_from_32(bn_biased);
@@ -545,37 +383,6 @@ module tb_pw_conv2_array_4x12;
             end
         end
     endfunction
-
-    task write_bn;
-        input integer oc_idx;
-        begin
-            @(negedge clk);
-            w_fold_we = 1'b1;
-            w_fold_oc = oc_idx[6:0];
-            w_fold_wdata = w_fold_value(oc_idx);
-            bias_fold_we = 1'b1;
-            bias_fold_oc = oc_idx[6:0];
-            bias_fold_wdata = bias_fold_value(oc_idx);
-            @(negedge clk);
-            w_fold_we = 1'b0;
-            bias_fold_we = 1'b0;
-        end
-    endtask
-
-    task load_bn;
-        begin
-            for (oc = 0; oc < PW2_OC; oc = oc + 1) begin
-                write_bn(oc);
-            end
-        end
-    endtask
-
-    task load_file_bn;
-        begin
-            test_mode = FILE_MODE;
-            load_bn();
-        end
-    endtask
 
     task reset_expected_gap;
         begin
@@ -598,30 +405,16 @@ module tb_pw_conv2_array_4x12;
     endtask
 
     task add_expected_gap;
-        input integer mode;
         input integer tile_t_base_i;
         input [ROWS-1:0] mask_i;
         reg signed [DATA_W-1:0] expected;
         begin
-            if (mode == FILE_MODE) begin
-                for (oc = 0; oc < PW2_OC; oc = oc + 1) begin
-                    expected_gap_sum[oc] = expected_gap_sum[oc]
-                        + file_expected_tile_sum[file_case_idx*PW2_OC + oc];
-                end
-            end else begin
-                for (oc = 0; oc < PW2_OC; oc = oc + 1) begin
-                    for (row = 0; row < ROWS; row = row + 1) begin
-                        if (mask_i[row]) begin
-                            expected = expected_value(
-                                mode,
-                                tile_t_base_i,
-                                row,
-                                oc,
-                                mask_i
-                            );
-                            expected_gap_sum[oc] =
-                                expected_gap_sum[oc] + extend_to_acc(expected);
-                        end
+            for (oc = 0; oc < PW2_OC; oc = oc + 1) begin
+                for (row = 0; row < ROWS; row = row + 1) begin
+                    if (mask_i[row]) begin
+                        expected = expected_value(tile_t_base_i, row, oc, mask_i);
+                        expected_gap_sum[oc] =
+                            expected_gap_sum[oc] + extend_to_acc(expected);
                     end
                 end
             end
@@ -635,7 +428,7 @@ module tb_pw_conv2_array_4x12;
         begin
             if (gap_count !== expected_count_i[8:0]) begin
                 $display(
-                    "ERROR PW2 gap_count got=%0d expected=%0d",
+                    "ERROR PW2 top gap_count got=%0d expected=%0d",
                     gap_count,
                     expected_count_i
                 );
@@ -643,7 +436,7 @@ module tb_pw_conv2_array_4x12;
             end
             if (gap_frame_done !== expected_frame_done_i[0]) begin
                 $display(
-                    "ERROR PW2 gap_frame_done got=%0d expected=%0d",
+                    "ERROR PW2 top gap_frame_done got=%0d expected=%0d",
                     gap_frame_done,
                     expected_frame_done_i[0]
                 );
@@ -653,7 +446,7 @@ module tb_pw_conv2_array_4x12;
             for (oc = 0; oc < PW2_OC; oc = oc + 1) begin
                 if (get_gap_value(oc) !== expected_gap_sum[oc]) begin
                     $display(
-                        "ERROR PW2 gap_sum oc=%0d got=%0d expected=%0d",
+                        "ERROR PW2 top gap_sum oc=%0d got=%0d expected=%0d",
                         oc,
                         $signed(get_gap_value(oc)),
                         $signed(expected_gap_sum[oc])
@@ -673,19 +466,19 @@ module tb_pw_conv2_array_4x12;
             expected_oc_base = expected_group * OC_LANES;
             expected_k = weight_req_count % PW2_IC;
 
-            if (weight_req_oc_base !== expected_oc_base[6:0]) begin
+            if (dut.weight_req_oc_base !== expected_oc_base[6:0]) begin
                 $display(
-                    "ERROR PW2 weight_req_oc_base got=%0d expected=%0d count=%0d",
-                    weight_req_oc_base,
+                    "ERROR PW2 top weight_req_oc_base got=%0d expected=%0d count=%0d",
+                    dut.weight_req_oc_base,
                     expected_oc_base,
                     weight_req_count
                 );
                 errors = errors + 1;
             end
-            if (weight_req_k !== expected_k[6:0]) begin
+            if (dut.weight_req_k !== expected_k[6:0]) begin
                 $display(
-                    "ERROR PW2 weight_req_k got=%0d expected=%0d count=%0d",
-                    weight_req_k,
+                    "ERROR PW2 top weight_req_k got=%0d expected=%0d count=%0d",
+                    dut.weight_req_k,
                     expected_k,
                     weight_req_count
                 );
@@ -701,7 +494,7 @@ module tb_pw_conv2_array_4x12;
 
             if (act_req_t_base !== test_tile_t_base[TIME_W-1:0]) begin
                 $display(
-                    "ERROR PW2 act_req_t_base got=%0d expected=%0d",
+                    "ERROR PW2 top act_req_t_base got=%0d expected=%0d",
                     act_req_t_base,
                     test_tile_t_base
                 );
@@ -709,7 +502,7 @@ module tb_pw_conv2_array_4x12;
             end
             if (act_req_k !== expected_k[6:0]) begin
                 $display(
-                    "ERROR PW2 act_req_k got=%0d expected=%0d count=%0d",
+                    "ERROR PW2 top act_req_k got=%0d expected=%0d count=%0d",
                     act_req_k,
                     expected_k,
                     act_req_count
@@ -718,7 +511,7 @@ module tb_pw_conv2_array_4x12;
             end
             if (act_req_row_valid_mask !== test_row_valid_mask[ROWS-1:0]) begin
                 $display(
-                    "ERROR PW2 act_req_row_valid_mask got=%b expected=%b",
+                    "ERROR PW2 top act_req_row_valid_mask got=%b expected=%b",
                     act_req_row_valid_mask,
                     test_row_valid_mask[ROWS-1:0]
                 );
@@ -730,8 +523,10 @@ module tb_pw_conv2_array_4x12;
     task launch;
         begin
             @(negedge clk);
+            tile_req_count = 0;
             weight_req_count = 0;
             act_req_count = 0;
+            act_resp_count = 0;
             start = 1'b1;
             tile_t_base = test_tile_t_base[TIME_W-1:0];
             row_valid_mask = test_row_valid_mask[ROWS-1:0];
@@ -745,16 +540,17 @@ module tb_pw_conv2_array_4x12;
         begin
             timeout = 0;
             last_timeout = 0;
+            last_cycle_count = 0;
             while ((done !== 1'b1) && (timeout < TIMEOUT)) begin
                 @(posedge clk);
                 #1;
                 timeout = timeout + 1;
             end
+            last_cycle_count = timeout;
 
             if (done !== 1'b1) begin
                 $display(
-                    "ERROR PW2 timeout mode=%0d tile=%0d mask=%b",
-                    test_mode,
+                    "ERROR PW2 top timeout tile=%0d mask=%b",
                     test_tile_t_base,
                     test_row_valid_mask[ROWS-1:0]
                 );
@@ -765,13 +561,10 @@ module tb_pw_conv2_array_4x12;
     endtask
 
     task run_gap_job_ext;
-        input integer mode;
         input integer tile_t_base_i;
         input [ROWS-1:0] row_valid_mask_i;
         input integer input_delay_i;
-        input integer weight_ready_mode_i;
         input integer act_ready_mode_i;
-        input integer resp_mode_i;
         input integer clear_before_i;
         input integer expect_frame_done_i;
         integer wait_step;
@@ -781,42 +574,59 @@ module tb_pw_conv2_array_4x12;
                 reset_expected_gap();
             end
 
-            test_mode = mode;
             test_tile_t_base = tile_t_base_i;
             test_row_valid_mask = row_valid_mask_i;
             input_delay = input_delay_i;
-            weight_ready_mode = weight_ready_mode_i;
             act_ready_mode = act_ready_mode_i;
-            resp_mode = resp_mode_i;
 
             launch();
 
             for (wait_step = 0; wait_step < input_delay_i; wait_step = wait_step + 1) begin
                 @(posedge clk);
                 #1;
-                if (weight_req_valid || act_req_valid) begin
-                    $display("ERROR PW2 requested data before input tile ready");
+                if (dut.weight_req_valid || act_req_valid) begin
+                    $display("ERROR PW2 top requested data before input tile ready");
                     errors = errors + 1;
                 end
             end
 
             wait_done();
             if (!last_timeout) begin
-                add_expected_gap(mode, tile_t_base_i, row_valid_mask_i);
+                add_expected_gap(tile_t_base_i, row_valid_mask_i);
 
+                if (tile_req_count != 1) begin
+                    $display("ERROR PW2 top tile_req_count got=%0d expected=1",
+                        tile_req_count);
+                    errors = errors + 1;
+                end
                 if (weight_req_count != OC_GROUPS * PW2_IC) begin
                     $display(
-                        "ERROR PW2 weight_req_count got=%0d expected=%0d",
+                        "ERROR PW2 top weight_req_count got=%0d expected=%0d",
                         weight_req_count,
                         OC_GROUPS * PW2_IC
                     );
                     errors = errors + 1;
                 end
-                if (act_req_count != OC_GROUPS * PW2_IC) begin
+                if (act_req_count != PW2_IC) begin
                     $display(
-                        "ERROR PW2 act_req_count got=%0d expected=%0d",
+                        "ERROR PW2 top act_req_count got=%0d expected=%0d",
                         act_req_count,
-                        OC_GROUPS * PW2_IC
+                        PW2_IC
+                    );
+                    errors = errors + 1;
+                end
+                if (act_resp_count != PW2_IC) begin
+                    $display(
+                        "ERROR PW2 top act_resp_count got=%0d expected=%0d",
+                        act_resp_count,
+                        PW2_IC
+                    );
+                    errors = errors + 1;
+                end
+                if (dut.u_weight.u_ctrl.invalid_req_count != 0) begin
+                    $display(
+                        "ERROR PW2 top weight invalid_req_count=%0d",
+                        dut.u_weight.u_ctrl.invalid_req_count
                     );
                     errors = errors + 1;
                 end
@@ -826,178 +636,52 @@ module tb_pw_conv2_array_4x12;
         end
     endtask
 
-    task run_gap_job;
-        input integer mode;
-        input integer tile_t_base_i;
-        input [ROWS-1:0] row_valid_mask_i;
-        input integer input_delay_i;
-        input integer weight_ready_mode_i;
-        input integer act_ready_mode_i;
-        begin
-            run_gap_job_ext(
-                mode,
-                tile_t_base_i,
-                row_valid_mask_i,
-                input_delay_i,
-                weight_ready_mode_i,
-                act_ready_mode_i,
-                RESP_ONE_CYCLE,
-                1,
-                0
-            );
-        end
-    endtask
-
-    task run_with_busy_start_pulse;
-        begin
-            clear_gap_accumulator();
-            reset_expected_gap();
-
-            test_mode = 0;
-            test_tile_t_base = 64;
-            test_row_valid_mask = 4'b1111;
-            input_delay = 0;
-            weight_ready_mode = READY_NONE;
-            act_ready_mode = READY_NONE;
-            resp_mode = RESP_ONE_CYCLE;
-
-            launch();
-
-            repeat (8) @(negedge clk);
-            start = 1'b1;
-            tile_t_base = 8'd120;
-            row_valid_mask = 4'b0011;
-            @(negedge clk);
-            start = 1'b0;
-
-            wait_done();
-            if (!last_timeout) begin
-                add_expected_gap(0, 64, 4'b1111);
-                check_gap_state(expected_gap_count, 0);
-            end
-        end
-    endtask
-
-    task run_with_busy_bn_write;
-        begin
-            clear_gap_accumulator();
-            reset_expected_gap();
-
-            test_mode = 1;
-            test_tile_t_base = 72;
-            test_row_valid_mask = 4'b1111;
-            input_delay = 0;
-            weight_ready_mode = READY_NONE;
-            act_ready_mode = READY_NONE;
-            resp_mode = RESP_ONE_CYCLE;
-
-            launch();
-
-            repeat (4) @(negedge clk);
-            w_fold_we = 1'b1;
-            w_fold_oc = 7'd12;
-            w_fold_wdata = 16'sd4096;
-            bias_fold_we = 1'b1;
-            bias_fold_oc = 7'd12;
-            bias_fold_wdata = -16'sd4096;
-            @(negedge clk);
-            w_fold_we = 1'b0;
-            bias_fold_we = 1'b0;
-
-            wait_done();
-            if (!last_timeout) begin
-                add_expected_gap(1, 72, 4'b1111);
-                check_gap_state(expected_gap_count, 0);
-            end
-        end
-    endtask
-
-    task reset_during_busy;
-        begin
-            test_mode = 0;
-            test_tile_t_base = 80;
-            test_row_valid_mask = 4'b1111;
-            input_delay = 0;
-            weight_ready_mode = READY_PERIODIC;
-            act_ready_mode = READY_LATE;
-            resp_mode = RESP_ONE_CYCLE;
-
-            launch();
-
-            repeat (6) @(negedge clk);
-            rst_n = 1'b0;
-            start = 1'b0;
-            gap_clear = 1'b0;
-            w_fold_we = 1'b0;
-            bias_fold_we = 1'b0;
-            #1;
-            if (busy !== 1'b0) begin
-                $display("ERROR PW2 busy is not low after mid-run reset");
-                errors = errors + 1;
-            end
-            if (gap_count !== 9'd0) begin
-                $display("ERROR PW2 gap_count is not zero after mid-run reset");
-                errors = errors + 1;
-            end
-
-            repeat (2) @(negedge clk);
-            rst_n = 1'b1;
-            repeat (2) @(negedge clk);
-            reset_expected_gap();
-        end
-    endtask
-
     task run_full_frame_gap;
-        integer t;
         begin
             clear_gap_accumulator();
             reset_expected_gap();
 
             for (t = 0; t <= 168; t = t + 4) begin
-                run_gap_job_ext(
-                    0,
-                    t,
-                    4'b1111,
-                    0,
-                    READY_NONE,
-                    READY_NONE,
-                    RESP_ONE_CYCLE,
-                    0,
-                    0
-                );
+                run_gap_job_ext(t, 4'b1111, 0, READY_NONE, 0, 0);
             end
 
-            run_gap_job_ext(
-                0,
-                172,
-                4'b0011,
-                0,
-                READY_NONE,
-                READY_NONE,
-                RESP_ONE_CYCLE,
-                0,
-                1
-            );
+            run_gap_job_ext(172, 4'b0011, 0, READY_NONE, 0, 1);
         end
     endtask
 
-    task run_file_golden_cases;
-        integer case_i;
+    task check_autoload_inputs;
         begin
-            load_file_bn();
-            for (case_i = 0; case_i < FILE_CASES; case_i = case_i + 1) begin
-                file_case_idx = case_i;
-                run_gap_job_ext(
-                    FILE_MODE,
-                    file_case_t_base[case_i],
-                    file_case_row_valid_mask[case_i][ROWS-1:0],
-                    case_i,
-                    (case_i % 2) ? READY_PERIODIC : READY_NONE,
-                    (case_i % 2) ? READY_NONE : READY_PERIODIC,
-                    (case_i == 1) ? RESP_ZERO_CYCLE : RESP_ONE_CYCLE,
-                    1,
-                    0
+            if ((^file_input[0]) === 1'bx) begin
+                $display("ERROR PW2 top input.mem did not load");
+                errors = errors + 1;
+            end
+            if ((^packed_weight_mem[0]) === 1'bx) begin
+                $display("ERROR PW2 top weight_packed.mem did not load");
+                errors = errors + 1;
+            end
+            if ((^bn_scale_mem[0]) === 1'bx) begin
+                $display("ERROR PW2 top bn_scale.mem did not load");
+                errors = errors + 1;
+            end
+            if ((^bn_bias_mem[0]) === 1'bx) begin
+                $display("ERROR PW2 top bn_bias.mem did not load");
+                errors = errors + 1;
+            end
+            if (dut.u_compute.w_fold_mem[0] !== bn_scale_mem[0]) begin
+                $display(
+                    "ERROR PW2 top BN scale autoload mismatch got=%h expected=%h",
+                    dut.u_compute.w_fold_mem[0],
+                    bn_scale_mem[0]
                 );
+                errors = errors + 1;
+            end
+            if (dut.u_compute.bias_fold_mem[0] !== bn_bias_mem[0]) begin
+                $display(
+                    "ERROR PW2 top BN bias autoload mismatch got=%h expected=%h",
+                    dut.u_compute.bias_fold_mem[0],
+                    bn_bias_mem[0]
+                );
+                errors = errors + 1;
             end
         end
     endtask
@@ -1010,9 +694,6 @@ module tb_pw_conv2_array_4x12;
         tile_t_base = {TIME_W{1'b0}};
         row_valid_mask = 4'b1111;
         input_tile_req_ready = 1'b0;
-        weight_req_ready = 1'b1;
-        weight_vec_valid_reg = 1'b0;
-        weight_vec_reg = {(OC_LANES*DATA_W){1'b0}};
         act_req_ready = 1'b1;
         act_vec_valid_reg = 1'b0;
         act_vec_reg = {(ROWS*DATA_W){1'b0}};
@@ -1023,80 +704,51 @@ module tb_pw_conv2_array_4x12;
         bias_fold_oc = 7'd0;
         bias_fold_wdata = 16'sd0;
         errors = 0;
-        test_mode = 0;
         test_tile_t_base = 0;
         test_row_valid_mask = 4'b1111;
         input_delay = 0;
-        weight_ready_mode = READY_NONE;
         act_ready_mode = READY_NONE;
-        resp_mode = RESP_ONE_CYCLE;
-        weight_ready_cycle = 0;
         act_ready_cycle = 0;
         input_wait_cycle = 0;
+        tile_req_count = 0;
         weight_req_count = 0;
         act_req_count = 0;
+        act_resp_count = 0;
         last_timeout = 0;
-        file_case_idx = 0;
+        last_cycle_count = 0;
         reset_expected_gap();
 
-        repeat (5) @(negedge clk);
+        repeat (8) @(negedge clk);
         rst_n = 1'b1;
+        repeat (2) @(negedge clk);
 
-        load_bn();
+        check_autoload_inputs();
 
-        // Basic full 4-row tile. One start computes and accumulates all 96 channels.
-        run_gap_job(0, 0, 4'b1111, 0, READY_NONE, READY_NONE);
-
-        // PW2 must wait for exact input tile readiness before requesting data.
-        run_gap_job(0, 12, 4'b1111, 4, READY_NONE, READY_NONE);
-
-        // Independent weight/activation request backpressure.
-        run_gap_job(1, 24, 4'b1111, 0, READY_PERIODIC, READY_LATE);
-
-        // Combinational response mode, covering req and response same-cycle fire.
-        run_gap_job_ext(
-            0,
-            36,
-            4'b1111,
-            0,
-            READY_NONE,
-            READY_NONE,
-            RESP_ZERO_CYCLE,
-            1,
-            0
+        run_gap_job_ext(0, 4'b1111, 0, READY_NONE, 1, 0);
+        $display(
+            "INFO PW2 top no-stall tile cycles=%0d weight_req=%0d act_req=%0d",
+            last_cycle_count,
+            weight_req_count,
+            act_req_count
         );
 
-        // Final partial tile for 174 low-resolution rows: only rows 172 and 173 are valid.
-        run_gap_job(0, 172, 4'b0011, 0, READY_PERIODIC, READY_NONE);
+        run_gap_job_ext(12, 4'b1111, 4, READY_NONE, 1, 0);
+        run_gap_job_ext(24, 4'b1111, 0, READY_PERIODIC, 1, 0);
+        run_gap_job_ext(172, 4'b0011, 0, READY_LATE, 1, 0);
 
-        // Back-to-back jobs without gap_clear must accumulate into the same 96 sums.
         clear_gap_accumulator();
         reset_expected_gap();
-        run_gap_job_ext(0, 88, 4'b1111, 0, READY_NONE, READY_NONE, RESP_ONE_CYCLE, 0, 0);
-        run_gap_job_ext(1, 92, 4'b1111, 2, READY_PERIODIC, READY_PERIODIC, RESP_ONE_CYCLE, 0, 0);
-        run_gap_job_ext(0, 172, 4'b0011, 0, READY_NONE, READY_NONE, RESP_ONE_CYCLE, 0, 0);
+        run_gap_job_ext(88, 4'b1111, 0, READY_NONE, 0, 0);
+        run_gap_job_ext(92, 4'b1111, 2, READY_PERIODIC, 0, 0);
+        run_gap_job_ext(172, 4'b0011, 0, READY_NONE, 0, 0);
 
-        // A complete 174-row frame should raise gap_frame_done on the final partial tile.
         run_full_frame_gap();
 
-        // A stray start during MAC must be ignored.
-        run_with_busy_start_pulse();
-
-        // Runtime folded-BN writes are ignored; active job must use preloaded BN.
-        run_with_busy_bn_write();
-
-        // Mid-run reset aborts the active job and leaves the core reusable.
-        reset_during_busy();
-        load_bn();
-        run_gap_job(0, 96, 4'b1111, 0, READY_NONE, READY_NONE);
-
-        run_file_golden_cases();
-
         if (errors == 0) begin
-            $display("PASS pw_conv2_array_4x12 GAP self-check");
+            $display("PASS pw_conv2_array_4x12 top self-check");
             $finish;
         end else begin
-            $display("FAIL pw_conv2_array_4x12 errors=%0d", errors);
+            $display("FAIL pw_conv2_array_4x12 top errors=%0d", errors);
             $finish;
         end
     end

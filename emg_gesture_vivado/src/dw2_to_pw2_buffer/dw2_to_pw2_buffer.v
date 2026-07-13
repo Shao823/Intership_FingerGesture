@@ -1,27 +1,31 @@
 `timescale 1ns / 1ps
 
-// Inter-stage buffer controller from dw_conv1_4ch_5tap to
-// pw_conv1_array_4x8.
+// Inter-stage buffer controller from dw_conv2_4ch_5tap to
+// pw_conv2_array_4x12.
 //
 // BRAM layout expected by this controller:
-//   128 x 64-bit true-dual-port RAM
-//   bank = ch_base / 4, bank 0..7 for 32 DW1 channels
+//   256 x 64-bit true-dual-port RAM
+//   bank = ch_base / 4, bank 0..15 for 64 DW2 channels
 //   row  = absolute out_t % 16
 //   addr = bank * 16 + row
 //   word = {x[ch_base+3], x[ch_base+2], x[ch_base+1], x[ch_base+0]}
 //
 // The BRAM stores only feature data. Ring metadata stays in registers:
 //   slot_valid[bank][row]
-//   slot_tag[bank][row] = absolute output time stored in the slot
+//   slot_tag[bank][row] = absolute DW2 output time stored in the slot
 //
-// A PW1 tile request is accepted when four consecutive output rows are present
-// for all eight 4-channel banks. After the request is accepted, both BRAM ports
-// preload the 4x32 activation tile into local registers. Runtime act_req reads
-// then come from the local cache, not from BRAM, so the first PW1 oc group can
-// fetch each input channel once and later groups can reuse PW1's own cache.
+// A PW2 tile request is accepted when every row asserted in row_valid_mask is
+// present for all sixteen 4-channel banks. Normal tiles use mask 4'b1111. The
+// final default 174-row tile at t_base=172 uses mask 4'b0011; invalid rows are
+// not read from BRAM and are returned as zero in act_vec.
+//
+// After a tile request is accepted, both BRAM ports preload the requested
+// activation tile into local registers. Runtime act_req reads then come from
+// the local cache, so PW2 can reuse the same activation tile across all output
+// channel groups without creating BRAM backpressure.
 //
 // Scheduler contract:
-//   PW1 tile requests must be monotonic and must not skip a tile that may be
+//   PW2 tile requests must be monotonic and must not skip a tile that may be
 //   requested later. A row slot may be overwritten after the tile containing the
 //   old row has been preloaded into this controller's local cache.
 //
@@ -30,17 +34,17 @@
 //   not clear BRAM contents. Stale BRAM words are ignored until metadata is
 //   written again.
 
-module dw1_to_pw1_buffer #(
+module dw2_to_pw2_buffer #(
     parameter integer DATA_W     = 16,
-    parameter integer TIME_W     = 9,
-    parameter integer INPUT_LEN  = 348,
-    parameter integer PW1_IC     = 32,
+    parameter integer TIME_W     = 8,
+    parameter integer INPUT_LEN  = 174,
+    parameter integer PW2_IC     = 64,
     parameter integer ROWS       = 4,
     parameter integer CH_LANES   = 4,
     parameter integer RING_ROWS  = 16,
-    parameter integer BANKS      = PW1_IC / CH_LANES,
+    parameter integer BANKS      = PW2_IC / CH_LANES,
     parameter integer BRAM_READ_LATENCY = 1,
-    parameter integer CH_BASE_W  = (PW1_IC <= 1) ? 1 : $clog2(PW1_IC + 1),
+    parameter integer CH_BASE_W  = (PW2_IC <= 1) ? 1 : $clog2(PW2_IC + 1),
     parameter integer ADDR_W     = (BANKS * RING_ROWS <= 1)
         ? 1 : $clog2(BANKS * RING_ROWS),
     parameter integer BANK_W     = (BANKS <= 1) ? 1 : $clog2(BANKS),
@@ -52,20 +56,22 @@ module dw1_to_pw1_buffer #(
     input  wire rst_n,
     input  wire clear,
 
-    input  wire dw1_out_valid,
-    output wire dw1_out_ready,
-    input  wire [TIME_W-1:0] dw1_out_t,
-    input  wire [CH_BASE_W-1:0] dw1_out_ch_base,
-    input  wire signed [CH_LANES*DATA_W-1:0] dw1_out_vec,
+    input  wire dw2_out_valid,
+    output wire dw2_out_ready,
+    input  wire [TIME_W-1:0] dw2_out_t,
+    input  wire [CH_BASE_W-1:0] dw2_out_ch_base,
+    input  wire signed [CH_LANES*DATA_W-1:0] dw2_out_vec,
 
     input  wire input_tile_req_valid,
     output wire input_tile_req_ready,
     input  wire [TIME_W-1:0] input_tile_req_t_base,
+    input  wire [ROWS-1:0] input_tile_req_row_valid_mask,
 
     input  wire act_req_valid,
     output wire act_req_ready,
     input  wire [TIME_W-1:0] act_req_t_base,
-    input  wire [5:0] act_req_k,
+    input  wire [6:0] act_req_k,
+    input  wire [ROWS-1:0] act_req_row_valid_mask,
 
     output wire act_vec_valid,
     input  wire act_vec_ready,
@@ -86,12 +92,11 @@ module dw1_to_pw1_buffer #(
     output wire wr_busy,
     output wire rd_busy,
     output wire tile_cache_valid,
-    output wire dw1_overwrite_stall
+    output wire dw2_overwrite_stall
 );
 
     localparam integer WORD_W = CH_LANES * DATA_W;
     localparam integer ACT_W  = ROWS * DATA_W;
-    localparam [LOAD_W-1:0] LOAD_WORDS_C = LOAD_WORDS;
 
     localparam [1:0] RD_IDLE  = 2'd0;
     localparam [1:0] RD_LOAD  = 2'd1;
@@ -99,6 +104,7 @@ module dw1_to_pw1_buffer #(
 
     reg [1:0] rd_state;
     reg [TIME_W-1:0] rd_tile_t_base;
+    reg [ROWS-1:0] rd_row_valid_mask;
     reg [LOAD_W-1:0] load_issue_idx;
     reg [LOAD_W-1:0] load_capture_count;
     reg [LOAD_W-1:0] act_resp_count;
@@ -110,7 +116,7 @@ module dw1_to_pw1_buffer #(
     reg row_full_valid [0:RING_ROWS-1];
     reg [TIME_W-1:0] row_full_tag [0:RING_ROWS-1];
     reg served_valid;
-    reg [TIME_W-1:0] served_tile_t_base;
+    reg [TIME_W:0] served_last_t;
 
     reg signed [WORD_W-1:0] tile_cache [0:LOAD_WORDS-1];
 
@@ -121,7 +127,7 @@ module dw1_to_pw1_buffer #(
     reg [ADDR_W-1:0] bram_a_addr_hold;
     reg [ADDR_W-1:0] bram_b_addr_hold;
 
-    wire dw1_fire;
+    wire dw2_fire;
     wire tile_req_fire;
     wire act_req_fire;
     wire act_resp_fire;
@@ -135,10 +141,11 @@ module dw1_to_pw1_buffer #(
     wire [1:0] load_capture_inc;
     wire load_done_next;
     wire act_resp_last_fire;
+    wire [LOAD_W-1:0] active_load_words;
 
-    reg dw1_params_valid_c;
-    reg dw1_slot_safe_c;
-    reg [BANK_W-1:0] dw1_bank_c;
+    reg dw2_params_valid_c;
+    reg dw2_slot_safe_c;
+    reg [BANK_W-1:0] dw2_bank_c;
     reg tile_params_valid_c;
     reg tile_available_c;
     reg act_req_params_valid_c;
@@ -155,31 +162,32 @@ module dw1_to_pw1_buffer #(
     integer seq_i;
 
     initial begin
-        if ((PW1_IC % CH_LANES) != 0) begin
-            $error("dw1_to_pw1_buffer: PW1_IC must be divisible by CH_LANES");
+        if ((PW2_IC % CH_LANES) != 0) begin
+            $error("dw2_to_pw2_buffer: PW2_IC must be divisible by CH_LANES");
         end
-        if (RING_ROWS < (ROWS * 3)) begin
+        if (RING_ROWS < (ROWS * 4)) begin
             $error(
-                "dw1_to_pw1_buffer: RING_ROWS %0d too small, need >= %0d",
+                "dw2_to_pw2_buffer: RING_ROWS %0d too small, need >= %0d",
                 RING_ROWS,
-                ROWS * 3
+                ROWS * 4
             );
         end
         if (BRAM_READ_LATENCY < 1) begin
-            $error("dw1_to_pw1_buffer: BRAM_READ_LATENCY must be >= 1");
+            $error("dw2_to_pw2_buffer: BRAM_READ_LATENCY must be >= 1");
         end
     end
 
     assign load_active = (rd_state == RD_LOAD);
+    assign active_load_words = count_valid_rows(rd_row_valid_mask) * BANKS;
 
-    assign dw1_out_ready = !clear
+    assign dw2_out_ready = !clear
         && !load_active
-        && dw1_params_valid_c
-        && dw1_slot_safe_c;
-    assign dw1_fire = dw1_out_valid && dw1_out_ready;
-    assign dw1_overwrite_stall = dw1_out_valid
-        && dw1_params_valid_c
-        && !dw1_slot_safe_c
+        && dw2_params_valid_c
+        && dw2_slot_safe_c;
+    assign dw2_fire = dw2_out_valid && dw2_out_ready;
+    assign dw2_overwrite_stall = dw2_out_valid
+        && dw2_params_valid_c
+        && !dw2_slot_safe_c
         && !clear;
 
     assign input_tile_req_ready = !clear
@@ -198,85 +206,104 @@ module dw1_to_pw1_buffer #(
     assign act_vec = act_resp_data;
     assign act_resp_fire = act_vec_valid && act_vec_ready;
     assign act_resp_last_fire = act_resp_fire
-        && (act_resp_count == (PW1_IC - 1));
+        && (act_resp_count == (PW2_IC - 1));
 
-    assign load_issue_a = load_active && (load_issue_idx < LOAD_WORDS);
-    assign load_issue_b = load_active && ((load_issue_idx + 1'b1) < LOAD_WORDS);
+    assign load_issue_a = load_active && (load_issue_idx < active_load_words);
+    assign load_issue_b = load_active
+        && ((load_issue_idx + 1'b1) < active_load_words);
     assign load_pipe_a_en = load_active && any_pre_response_valid(bram_a_valid_d);
     assign load_pipe_b_en = load_active && any_pre_response_valid(bram_b_valid_d);
     assign load_capture_a = bram_a_valid_d[BRAM_READ_LATENCY];
     assign load_capture_b = bram_b_valid_d[BRAM_READ_LATENCY];
     assign load_capture_inc = {1'b0, load_capture_a} + {1'b0, load_capture_b};
     assign load_done_next = load_active
-        && ((load_capture_count + load_capture_inc) >= LOAD_WORDS_C);
+        && ((load_capture_count + load_capture_inc) >= active_load_words);
 
-    assign bram_a_en = load_issue_a || load_pipe_a_en || dw1_fire;
-    assign bram_a_we = !load_active && dw1_fire;
+    assign bram_a_en = load_issue_a || load_pipe_a_en || dw2_fire;
+    assign bram_a_we = !load_active && dw2_fire;
     assign bram_a_addr = load_issue_a
-        ? calc_load_addr(rd_tile_t_base, load_issue_idx)
+        ? calc_load_addr(rd_tile_t_base, rd_row_valid_mask, load_issue_idx)
         : (load_pipe_a_en
             ? bram_a_addr_hold
-            : calc_sample_addr(dw1_bank_c, dw1_out_t));
-    dw1_to_pw1_hold_delay #(
+            : calc_sample_addr(dw2_bank_c, dw2_out_t));
+    dw2_to_pw2_hold_delay #(
         .WIDTH(WORD_W)
     ) u_bram_a_din_hold_delay (
-        .din(dw1_out_vec),
+        .din(dw2_out_vec),
         .dout(bram_a_din)
     );
 
     assign bram_b_en = load_issue_b || load_pipe_b_en;
     assign bram_b_we = 1'b0;
     assign bram_b_addr = load_issue_b
-        ? calc_load_addr(rd_tile_t_base, load_issue_idx + 1'b1)
+        ? calc_load_addr(
+            rd_tile_t_base,
+            rd_row_valid_mask,
+            load_issue_idx + 1'b1
+        )
         : bram_b_addr_hold;
     assign bram_b_din = {WORD_W{1'b0}};
 
-    assign wr_busy = dw1_fire;
+    assign wr_busy = dw2_fire;
     assign rd_busy = (rd_state != RD_IDLE);
     assign tile_cache_valid = (rd_state == RD_READY);
 
     always @* begin
-        dw1_bank_c = dw1_out_ch_base / CH_LANES;
+        dw2_bank_c = dw2_out_ch_base / CH_LANES;
         wr_comb_idx = 0;
-        dw1_params_valid_c = ((dw1_out_ch_base % CH_LANES) == 0)
-            && (dw1_out_ch_base <= (PW1_IC - CH_LANES))
-            && (dw1_out_t < INPUT_LEN);
-        dw1_slot_safe_c = dw1_params_valid_c;
+        dw2_params_valid_c = ((dw2_out_ch_base % CH_LANES) == 0)
+            && (dw2_out_ch_base <= (PW2_IC - CH_LANES))
+            && (dw2_out_t < INPUT_LEN);
+        dw2_slot_safe_c = dw2_params_valid_c;
 
-        if (dw1_params_valid_c) begin
-            wr_comb_idx = dw1_out_t % RING_ROWS;
+        if (dw2_params_valid_c) begin
+            wr_comb_idx = dw2_out_t % RING_ROWS;
             if (!slot_can_overwrite_value(
-                    slot_valid[dw1_bank_c][wr_comb_idx[ROW_IDX_W-1:0]],
-                    slot_tag[dw1_bank_c][wr_comb_idx[ROW_IDX_W-1:0]],
+                    slot_valid[dw2_bank_c][wr_comb_idx[ROW_IDX_W-1:0]],
+                    slot_tag[dw2_bank_c][wr_comb_idx[ROW_IDX_W-1:0]],
                     served_valid,
-                    served_tile_t_base,
-                    dw1_out_t
+                    served_last_t,
+                    dw2_out_t
                 )) begin
-                dw1_slot_safe_c = 1'b0;
+                dw2_slot_safe_c = 1'b0;
             end
         end
     end
 
     always @* begin
-        tile_params_valid_c = (input_tile_req_t_base <= (INPUT_LEN - ROWS));
+        tile_params_valid_c = (input_tile_req_row_valid_mask != {ROWS{1'b0}});
         tile_available_c = tile_params_valid_c;
         tile_comb_t = 0;
         tile_comb_idx = 0;
         tile_comb_t_vec = {TIME_W{1'b0}};
 
+        for (tile_comb_row = 0;
+             tile_comb_row < ROWS;
+             tile_comb_row = tile_comb_row + 1) begin
+            if (input_tile_req_row_valid_mask[tile_comb_row]) begin
+                tile_comb_t = input_tile_req_t_base + tile_comb_row;
+                if (tile_comb_t >= INPUT_LEN) begin
+                    tile_params_valid_c = 1'b0;
+                    tile_available_c = 1'b0;
+                end
+            end
+        end
+
         if (tile_params_valid_c) begin
             for (tile_comb_row = 0;
                  tile_comb_row < ROWS;
                  tile_comb_row = tile_comb_row + 1) begin
-                tile_comb_t = input_tile_req_t_base + tile_comb_row;
-                tile_comb_idx = tile_comb_t % RING_ROWS;
-                tile_comb_t_vec = tile_comb_t;
-                if (!slot_has_time(
-                        row_full_valid[tile_comb_idx[ROW_IDX_W-1:0]],
-                        row_full_tag[tile_comb_idx[ROW_IDX_W-1:0]],
-                        tile_comb_t_vec
-                    )) begin
-                    tile_available_c = 1'b0;
+                if (input_tile_req_row_valid_mask[tile_comb_row]) begin
+                    tile_comb_t = input_tile_req_t_base + tile_comb_row;
+                    tile_comb_idx = tile_comb_t % RING_ROWS;
+                    tile_comb_t_vec = tile_comb_t;
+                    if (!slot_has_time(
+                            row_full_valid[tile_comb_idx[ROW_IDX_W-1:0]],
+                            row_full_tag[tile_comb_idx[ROW_IDX_W-1:0]],
+                            tile_comb_t_vec
+                        )) begin
+                        tile_available_c = 1'b0;
+                    end
                 end
             end
         end
@@ -284,7 +311,8 @@ module dw1_to_pw1_buffer #(
 
     always @* begin
         act_req_params_valid_c = (act_req_t_base == rd_tile_t_base)
-            && (act_req_k < PW1_IC);
+            && (act_req_k < PW2_IC)
+            && (act_req_row_valid_mask == rd_row_valid_mask);
     end
 
     function [ADDR_W-1:0] calc_sample_addr;
@@ -297,15 +325,122 @@ module dw1_to_pw1_buffer #(
 
     function [ADDR_W-1:0] calc_load_addr;
         input [TIME_W-1:0] tile_t_base_i;
+        input [ROWS-1:0] mask_i;
         input [LOAD_W-1:0] load_idx_i;
+        integer active_rows_i;
         integer bank_i;
+        integer row_ord_i;
         integer row_i;
         integer time_i;
         begin
-            bank_i = load_idx_i / ROWS;
-            row_i = load_idx_i % ROWS;
-            time_i = tile_t_base_i + row_i;
-            calc_load_addr = (bank_i * RING_ROWS) + (time_i % RING_ROWS);
+            active_rows_i = count_valid_rows(mask_i);
+            if (active_rows_i == 0) begin
+                calc_load_addr = {ADDR_W{1'b0}};
+            end else begin
+                case (active_rows_i)
+                    1: begin
+                        bank_i = load_idx_i;
+                        row_ord_i = 0;
+                    end
+                    2: begin
+                        bank_i = load_idx_i >> 1;
+                        row_ord_i = load_idx_i[0];
+                    end
+                    3: begin
+                        bank_i = load_idx_i / 3;
+                        row_ord_i = load_idx_i - (bank_i * 3);
+                    end
+                    default: begin
+                        bank_i = load_idx_i >> 2;
+                        row_ord_i = load_idx_i[1:0];
+                    end
+                endcase
+                row_i = active_row_index(mask_i, row_ord_i);
+                time_i = tile_t_base_i + row_i;
+                calc_load_addr = (bank_i * RING_ROWS) + (time_i % RING_ROWS);
+            end
+        end
+    endfunction
+
+    function [LOAD_W-1:0] calc_load_cache_idx;
+        input [ROWS-1:0] mask_i;
+        input [LOAD_W-1:0] load_idx_i;
+        integer active_rows_i;
+        integer bank_i;
+        integer row_ord_i;
+        integer row_i;
+        begin
+            active_rows_i = count_valid_rows(mask_i);
+            if (active_rows_i == 0) begin
+                calc_load_cache_idx = {LOAD_W{1'b0}};
+            end else begin
+                case (active_rows_i)
+                    1: begin
+                        bank_i = load_idx_i;
+                        row_ord_i = 0;
+                    end
+                    2: begin
+                        bank_i = load_idx_i >> 1;
+                        row_ord_i = load_idx_i[0];
+                    end
+                    3: begin
+                        bank_i = load_idx_i / 3;
+                        row_ord_i = load_idx_i - (bank_i * 3);
+                    end
+                    default: begin
+                        bank_i = load_idx_i >> 2;
+                        row_ord_i = load_idx_i[1:0];
+                    end
+                endcase
+                row_i = active_row_index(mask_i, row_ord_i);
+                calc_load_cache_idx = bank_i * ROWS + row_i;
+            end
+        end
+    endfunction
+
+    function [LOAD_W-1:0] count_valid_rows;
+        input [ROWS-1:0] mask_i;
+        integer row_i;
+        begin
+            count_valid_rows = {LOAD_W{1'b0}};
+            for (row_i = 0; row_i < ROWS; row_i = row_i + 1) begin
+                if (mask_i[row_i]) begin
+                    count_valid_rows = count_valid_rows + 1'b1;
+                end
+            end
+        end
+    endfunction
+
+    function integer active_row_index;
+        input [ROWS-1:0] mask_i;
+        input integer ord_i;
+        integer row_i;
+        integer seen_i;
+        begin
+            active_row_index = 0;
+            seen_i = 0;
+            for (row_i = 0; row_i < ROWS; row_i = row_i + 1) begin
+                if (mask_i[row_i]) begin
+                    if (seen_i == ord_i) begin
+                        active_row_index = row_i;
+                    end
+                    seen_i = seen_i + 1;
+                end
+            end
+        end
+    endfunction
+
+    function [TIME_W:0] calc_mask_last_t;
+        input [TIME_W-1:0] tile_t_base_i;
+        input [ROWS-1:0] mask_i;
+        integer row_i;
+        begin
+            calc_mask_last_t = {1'b0, tile_t_base_i};
+            for (row_i = 0; row_i < ROWS; row_i = row_i + 1) begin
+                if (mask_i[row_i]) begin
+                    calc_mask_last_t = {1'b0, tile_t_base_i} + row_i;
+                end
+            end
         end
     endfunction
 
@@ -333,11 +468,9 @@ module dw1_to_pw1_buffer #(
         input valid_i;
         input [TIME_W-1:0] tag_i;
         input served_valid_i;
-        input [TIME_W-1:0] served_tile_t_base_i;
+        input [TIME_W:0] served_last_t_i;
         input [TIME_W-1:0] target_t_i;
-        reg [TIME_W:0] served_last_t_i;
         begin
-            served_last_t_i = {1'b0, served_tile_t_base_i} + (ROWS - 1);
             slot_can_overwrite_value = !valid_i
                 || (tag_i == target_t_i)
                 || (served_valid_i && ({1'b0, tag_i} <= served_last_t_i));
@@ -345,7 +478,8 @@ module dw1_to_pw1_buffer #(
     endfunction
 
     function signed [ACT_W-1:0] make_act_vec_from_cache;
-        input [5:0] k_i;
+        input [6:0] k_i;
+        input [ROWS-1:0] mask_i;
         integer row_i;
         integer bank_i;
         integer lane_i;
@@ -355,9 +489,11 @@ module dw1_to_pw1_buffer #(
             bank_i = k_i / CH_LANES;
             lane_i = k_i % CH_LANES;
             for (row_i = 0; row_i < ROWS; row_i = row_i + 1) begin
-                word_i = tile_cache[bank_i*ROWS + row_i];
-                make_act_vec_from_cache[row_i*DATA_W +: DATA_W]
-                    = word_i[lane_i*DATA_W +: DATA_W];
+                if (mask_i[row_i]) begin
+                    word_i = tile_cache[bank_i*ROWS + row_i];
+                    make_act_vec_from_cache[row_i*DATA_W +: DATA_W]
+                        = word_i[lane_i*DATA_W +: DATA_W];
+                end
             end
         end
     endfunction
@@ -375,20 +511,20 @@ module dw1_to_pw1_buffer #(
                 row_full_tag[rst_row] <= {TIME_W{1'b0}};
             end
             served_valid <= 1'b0;
-            served_tile_t_base <= {TIME_W{1'b0}};
+            served_last_t <= {(TIME_W+1){1'b0}};
         end else begin
-            if (dw1_fire) begin
-                full_idx = dw1_out_t % RING_ROWS;
-                slot_valid[dw1_bank_c][full_idx[ROW_IDX_W-1:0]] <= 1'b1;
-                slot_tag[dw1_bank_c][full_idx[ROW_IDX_W-1:0]] <= dw1_out_t;
+            if (dw2_fire) begin
+                full_idx = dw2_out_t % RING_ROWS;
+                slot_valid[dw2_bank_c][full_idx[ROW_IDX_W-1:0]] <= 1'b1;
+                slot_tag[dw2_bank_c][full_idx[ROW_IDX_W-1:0]] <= dw2_out_t;
                 row_full_valid[full_idx[ROW_IDX_W-1:0]] <= 1'b1;
-                row_full_tag[full_idx[ROW_IDX_W-1:0]] <= dw1_out_t;
+                row_full_tag[full_idx[ROW_IDX_W-1:0]] <= dw2_out_t;
                 for (full_bank = 0; full_bank < BANKS; full_bank = full_bank + 1) begin
-                    if (full_bank != dw1_bank_c) begin
+                    if (full_bank != dw2_bank_c) begin
                         if (!slot_has_time(
                                 slot_valid[full_bank][full_idx[ROW_IDX_W-1:0]],
                                 slot_tag[full_bank][full_idx[ROW_IDX_W-1:0]],
-                                dw1_out_t
+                                dw2_out_t
                             )) begin
                             row_full_valid[full_idx[ROW_IDX_W-1:0]] <= 1'b0;
                         end
@@ -399,8 +535,10 @@ module dw1_to_pw1_buffer #(
             if (load_done_next) begin
                 served_valid <= 1'b1;
                 if (!served_valid
-                    || ({1'b0, rd_tile_t_base} >= {1'b0, served_tile_t_base})) begin
-                    served_tile_t_base <= rd_tile_t_base;
+                    || (calc_mask_last_t(rd_tile_t_base, rd_row_valid_mask)
+                        >= served_last_t)) begin
+                    served_last_t
+                        <= calc_mask_last_t(rd_tile_t_base, rd_row_valid_mask);
                 end
             end
         end
@@ -426,8 +564,10 @@ module dw1_to_pw1_buffer #(
 
             bram_a_valid_d[0] <= load_issue_a;
             bram_b_valid_d[0] <= load_issue_b;
-            bram_a_idx_d[0] <= load_issue_idx;
-            bram_b_idx_d[0] <= load_issue_idx + 1'b1;
+            bram_a_idx_d[0]
+                <= calc_load_cache_idx(rd_row_valid_mask, load_issue_idx);
+            bram_b_idx_d[0]
+                <= calc_load_cache_idx(rd_row_valid_mask, load_issue_idx + 1'b1);
             for (seq_i = 1; seq_i <= BRAM_READ_LATENCY; seq_i = seq_i + 1) begin
                 bram_a_valid_d[seq_i] <= bram_a_valid_d[seq_i-1];
                 bram_b_valid_d[seq_i] <= bram_b_valid_d[seq_i-1];
@@ -441,6 +581,7 @@ module dw1_to_pw1_buffer #(
         if (!rst_n || clear) begin
             rd_state <= RD_IDLE;
             rd_tile_t_base <= {TIME_W{1'b0}};
+            rd_row_valid_mask <= {ROWS{1'b0}};
             load_issue_idx <= {LOAD_W{1'b0}};
             load_capture_count <= {LOAD_W{1'b0}};
             act_resp_count <= {LOAD_W{1'b0}};
@@ -455,20 +596,23 @@ module dw1_to_pw1_buffer #(
                     act_resp_valid <= 1'b0;
                     if (tile_req_fire) begin
                         rd_tile_t_base <= input_tile_req_t_base;
+                        rd_row_valid_mask <= input_tile_req_row_valid_mask;
                         rd_state <= RD_LOAD;
                     end
                 end
 
                 RD_LOAD: begin
-                    if (load_issue_idx < LOAD_WORDS) begin
+                    if (load_issue_idx < active_load_words) begin
                         load_issue_idx <= load_issue_idx + 2'd2;
                     end
 
                     if (load_capture_a) begin
-                        tile_cache[bram_a_idx_d[BRAM_READ_LATENCY]] <= bram_a_dout;
+                        tile_cache[bram_a_idx_d[BRAM_READ_LATENCY]]
+                            <= bram_a_dout;
                     end
                     if (load_capture_b) begin
-                        tile_cache[bram_b_idx_d[BRAM_READ_LATENCY]] <= bram_b_dout;
+                        tile_cache[bram_b_idx_d[BRAM_READ_LATENCY]]
+                            <= bram_b_dout;
                     end
 
                     load_capture_count <= load_capture_count + load_capture_inc;
@@ -483,7 +627,8 @@ module dw1_to_pw1_buffer #(
                 RD_READY: begin
                     if (act_req_fire) begin
                         act_resp_valid <= 1'b1;
-                        act_resp_data <= make_act_vec_from_cache(act_req_k);
+                        act_resp_data
+                            <= make_act_vec_from_cache(act_req_k, rd_row_valid_mask);
                     end else if (act_resp_fire) begin
                         act_resp_valid <= 1'b0;
                         act_resp_data <= {ACT_W{1'b0}};
@@ -509,8 +654,8 @@ module dw1_to_pw1_buffer #(
     end
 
 `ifndef SYNTHESIS
-    reg [31:0] invalid_dw1_write_count;
-    reg [31:0] dw1_overwrite_stall_count;
+    reg [31:0] invalid_dw2_write_count;
+    reg [31:0] dw2_overwrite_stall_count;
     reg [31:0] invalid_tile_req_count;
     reg [31:0] unavailable_tile_req_count;
     reg [31:0] invalid_act_req_count;
@@ -518,18 +663,18 @@ module dw1_to_pw1_buffer #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n || clear) begin
-            invalid_dw1_write_count <= 32'd0;
-            dw1_overwrite_stall_count <= 32'd0;
+            invalid_dw2_write_count <= 32'd0;
+            dw2_overwrite_stall_count <= 32'd0;
             invalid_tile_req_count <= 32'd0;
             unavailable_tile_req_count <= 32'd0;
             invalid_act_req_count <= 32'd0;
             early_act_req_count <= 32'd0;
         end else begin
-            if (dw1_out_valid && !dw1_params_valid_c) begin
-                invalid_dw1_write_count <= invalid_dw1_write_count + 1'b1;
+            if (dw2_out_valid && !dw2_params_valid_c) begin
+                invalid_dw2_write_count <= invalid_dw2_write_count + 1'b1;
             end
-            if (dw1_overwrite_stall) begin
-                dw1_overwrite_stall_count <= dw1_overwrite_stall_count + 1'b1;
+            if (dw2_overwrite_stall) begin
+                dw2_overwrite_stall_count <= dw2_overwrite_stall_count + 1'b1;
             end
             if (input_tile_req_valid
                 && (rd_state == RD_IDLE)
@@ -556,7 +701,7 @@ module dw1_to_pw1_buffer #(
 
 endmodule
 
-module dw1_to_pw1_hold_delay #(
+module dw2_to_pw2_hold_delay #(
     parameter integer WIDTH = 1
 ) (
     input  wire [WIDTH-1:0] din,
