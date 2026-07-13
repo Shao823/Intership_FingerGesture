@@ -18,6 +18,16 @@ python3 preparation/lightcnn1d_streaming_pipeline_design/buffer_model.py --stem-
 python3 preparation/lightcnn1d_streaming_pipeline_design/storage_model.py --stem-poc 4 --pw1-poc 8 --pw2-poc 12 --dw-pch 4 --dw-ptap 5
 ```
 
+当前实现状态补充：
+
+```text
+2026-07-11 当前 Vivado 截图显示：
+1. 当前 RTL 已经不是单纯计算核预算，而是包含真实 BMG IP、buffer controller、ROM controller、PW2/GAP、FC ROM wrapper 和综合友好 accelerator 顶层的一版完整实现。
+2. 该版本 timing 已满足 100 MHz 约束，WNS=+1.823 ns，WHS=+0.056 ns，WPWS=+4.090 ns。
+3. 该版本在当前 xc7k70t 资源口径下仍资源超配：LUT=250.48%，DSP=100.00%，FF=92.63%。
+4. 因此后续优先级已经从“先证明功能和时序”转成“在保持 timing 的前提下降 LUT/DSP/FF”。
+```
+
 ---
 
 ## 1. 推荐参数
@@ -492,6 +502,32 @@ weight + folded BN + bias:    319,568 bit = 39,946 B
 
 最后一行是当前脚本的全包含估计：级间/state、optional FIFO、计算本地寄存器、全部片上参数 ROM 都算进去。实际综合时 BRAM/LUTRAM/register 会按端口数、banking 和字宽对齐，物理占用会比这个 bit-level 统计略有上浮。
 
+### 7.5 当前 BMG IP 资源实测口径
+
+当前 Vivado 截图中 BRAM 使用为：
+
+| Resource | Utilization | Available | Utilization % |
+| --- | ---: | ---: | ---: |
+| BRAM | 22.50 | 135 | 16.67% |
+
+这说明当前存储容量不是瓶颈。和 bit-level 预算相比，物理 BRAM 占用更接近“IP 个数、端口类型、读输出寄存器、word width 对齐”决定的结果，而不是纯粹由有效 bit 数决定。
+
+当前手动 BMG IP 组织：
+
+| IP | 类型 | 宽度 x 深度 | 作用 |
+| --- | --- | ---: | --- |
+| `blk_mem_gen_stem_weight` | Single Port ROM | 64 x 280 | stem packed weight |
+| `blk_mem_gen_pw_conv1_weight` | Single Port ROM | 128 x 256 | PW1 packed weight |
+| `blk_mem_gen_pw_conv2_weight` | Single Port ROM | 192 x 512 | PW2 packed weight |
+| `blk_mem_gen_fc_weight` | Single Port ROM | 256 x 679 | FC0/FC1 packed weight |
+| `blk_mem_gen_stem_activation` | True Dual Port RAM | 64 x 435 | raw activation input |
+| `blk_mem_gen_stem_to_dw_conv1` | Simple Dual Port RAM | 64 x 128 | stem->DW1 ring buffer |
+| `blk_mem_gen_dw_to_pw_conv1` | True Dual Port RAM | 64 x 128 | DW1->PW1 ring/tile buffer |
+| `blk_mem_gen_pw_to_dw_conv2` | True Dual Port RAM | 64 x 256 | PW1->DW2 ring buffer |
+| `blk_mem_gen_dw_to_pw_conv2` | True Dual Port RAM | 64 x 256 | DW2->PW2 ring/tile buffer |
+
+当前 BRAM 只用 16.67%，后续为了降 LUT/FF，可以优先考虑把可接受 1 拍读延迟的大型寄存器表、调试缓存或部分 metadata 迁到 BRAM/LUTRAM，而不是继续用大量分布式寄存器实现。
+
 ---
 
 ## 8. 计算资源落地性和优化路线
@@ -508,25 +544,86 @@ weight + folded BN + bias:    319,568 bit = 39,946 B
 | GAP 前端合计 | 136 | 第一版 all-DSP 可验证功能 |
 | 独立 FC `P_OUT=16` | 16 | 建议复用 PW2 或单独轻量实现 |
 
+注意：上表只统计理想 MAC datapath 的“并行乘法需求”，不等于 Vivado 最终 DSP 使用数。当前 RTL 还包含：
+
+```text
+1. stem/PW1/PW2 folded BN scale 乘法。
+2. FC0/FC1 独立 packed ROM + 16-lane/5-lane MAC。
+3. FC GAP average 的常数倒数乘法。
+4. DW full-tap 乘法、pipeline 暂存和控制逻辑。
+5. 综合器对 16-bit signed multiply 的 DSP 推断策略。
+```
+
+因此当前实测 DSP 已达到 240/240，而不是理论表里的 136 或 152。
+
+### 当前 Vivado 实测结果
+
+当前两张截图对应的资源和时序结果：
+
+| Resource | Utilization | Available | Utilization % | 判断 |
+| --- | ---: | ---: | ---: | --- |
+| LUT | 102,697 | 41,000 | 250.48% | 严重超配，当前第一瓶颈 |
+| LUTRAM | 96 | 13,400 | 0.72% | 几乎未用，可作为后续 LUT/FF 换存储的空间 |
+| FF | 75,955 | 82,000 | 92.63% | 接近上限，后续不能盲目加 pipeline |
+| BRAM | 22.50 | 135 | 16.67% | 充足 |
+| DSP | 240 | 240 | 100.00% | 已打满，第二瓶颈 |
+| IO | 84 | 300 | 28.00% | 已因 accelerator 顶层简化而可接受 |
+
+Timing：
+
+| 类别 | Slack | TNS/THS/TPWS | Failing endpoints | 判断 |
+| --- | ---: | ---: | ---: | --- |
+| Setup WNS | +1.823 ns | 0.000 ns | 0 | 100 MHz 已满足 |
+| Hold WHS | +0.056 ns | 0.000 ns | 0 | hold 已转正，但余量较小 |
+| Pulse Width WPWS | +4.090 ns | 0.000 ns | 0 | 满足 |
+
+结论：
+
+```text
+1. 当前 accelerator 风格顶层已经解决了旧 full debug top 的 IO 爆炸问题。
+2. FC average 拆拍、DW 三阶段流水、buffer metadata 优化和 BRAM DI hold delay 对 timing 有效。
+3. 当前工程不是时序先失败，而是资源先失败：LUT 超 2.5x，DSP 已 100%，FF 也接近满。
+4. 后续优化不应再优先盲目加深流水；除非 worst path 明确要求，否则加 pipeline 会继续推高 FF/LUT。
+5. 当前 BRAM 很宽裕，优化路线应更多考虑用 BRAM/LUTRAM 换 LUT/FF，或用时分复用/低比特/常系数化换 DSP。
+```
+
 判断：
 
 ```text
-1. 对 Zynq-7020 / Artix-7 100T 这类 150 到 220+ DSP 级别器件：
-   当前 136 个前端乘法器可以落地，但 DSP 占用不低。
+1. 对当前 xc7k70t 口径：
+   当前完整 RTL 资源不可落地，主要卡在 LUT=250.48% 和 DSP=100%。
 
-2. 对 80 到 100 DSP 级别的小 FPGA：
-   如果全部 16-bit 乘法都走 DSP，当前设计偏紧甚至放不下。
+2. 对 150 到 220+ DSP 级别器件：
+   理论 MAC 预算看似可落地，但实测说明 folded BN、FC、控制和综合推断会把 DSP/LUT 明显推高。
 
-3. 对几十个 DSP 的更小 FPGA：
+3. 对 80 到 100 DSP 级别的小 FPGA：
+   当前完整 RTL 必须做大幅资源压缩，不能只靠换顶层接口解决。
+
+4. 对几十个 DSP 的更小 FPGA：
    必须降低并行度、复用 PW 计算资源、降低精度或牺牲 II；
    不能同时保持当前 560-cycle/chunk 节拍和当前 16-bit 全并行映射。
 ```
 
-因此第一版 RTL 可以先按“功能正确 + 时序容易收敛”做 all-DSP 原型；如果目标板 DSP 紧张，再按下面顺序压缩。
+因此第一版 RTL 已经完成“功能正确 + 100 MHz timing 可达”的目标；下一版目标应明确改成资源压缩。
 
-### 8.1 首选优化：FC 复用 PW2
+### 8.1 首选优化：去掉剩余 debug/验证开销并保持 accelerator 顶层
 
-FC0/FC1 在 `GAP` 收齐之后才启动，不和 GAP 前的卷积流水线同时处于高吞吐稳态。若不是多窗口重叠推理，FC 没必要独占 16 个乘法器。
+当前 IO 已从旧 full debug top 的不可用状态降到 84/300，但 LUT/FF 仍很高。继续优化时应坚持用 `accelerator` 作为 synthesis top，不再综合带大量统计/debug 端口的验证 top。
+
+建议：
+
+```text
+1. synthesis top 使用 accelerator。
+2. 统计计数器、内部 busy/stall/pending debug 只保留在 testbench/full debug top。
+3. 对最终 IP 只暴露 start/busy/done/class_valid/class_idx/input write/status。
+4. 如果需要调试信息，通过 AXI-Lite status register 分批读取，不把宽向量直接拉到顶层。
+```
+
+该步骤已经解决 IO，但仍应持续避免 debug 逻辑回流到最终 top。
+
+### 8.2 第二步：FC 复用 PW2 或降低 FC 并行
+
+FC0/FC1 在 `GAP` 收齐之后才启动，不和 GAP 前的卷积流水线同时处于高吞吐稳态。若不是多窗口重叠推理，FC 没必要独占 16-lane 乘法资源。
 
 建议：
 
@@ -543,7 +640,17 @@ FC0/FC1 复用 PW2 的部分 PE，或复用一个 4x12 阵列中的 output-chann
 
 这样总乘法资源按前端 136 个估算，而不是 152 个。
 
-### 8.2 第二步：DW 乘法转 LUT 或常系数乘法
+当前 RTL 的 FC 已改成 `blk_mem_gen_fc_weight` packed ROM 读取，并且 GAP average 使用常数倒数乘法分拍。若综合后 DSP 仍由 FC/AVG 占用较多，下一步可以：
+
+```text
+1. 让 FC0/FC1 复用 PW2 的乘法 lane。
+2. 或把 FC0_OUT_LANES 从 16 降到 8/4，接受 FC 尾延迟增加。
+3. 或将 GAP average 的 reciprocal multiply 映射到 LUT/CARRY，避免继续吃 DSP。
+```
+
+FC 运行在整帧前端 drain 之后，增加几百到几千 cycles 对总体延迟影响小于前端降并行；所以 FC 是优先压资源的位置。
+
+### 8.3 第三步：DW 乘法转 LUT 或常系数乘法
 
 DW1/DW2 的全局利用率只有 11.4%，但 full-tap 版本占 40 个乘法器：
 
@@ -578,7 +685,15 @@ II 仍由 stem 决定，为 560 cycles/chunk
 
 代价是 LUT 和布线压力上升，尤其 16x16 通用 LUT 乘法面积不小。更推荐在参数导出时把 DW 权重做常系数优化，而不是让综合器推断普通 16x16 LUT multiplier。
 
-### 8.3 第三步：DW tap 串行
+当前实测 LUT 已严重超配，所以不能简单把 DW 通用乘法全部推给 LUT。更合理的落地方式是：
+
+```text
+1. 先尝试让 DW 权重固定常量化，使用 CSD/shift-add 或低比特权重。
+2. 若 LUT 增量仍大，再改 tap 串行，减少同时存在的乘法器数量。
+3. 每次修改后同时看 DSP、LUT 和 WNS，不能只看 DSP 下降。
+```
+
+### 8.4 第四步：DW tap 串行
 
 如果 DSP 或 LUT 都紧张，可以把 DW 改成：
 
@@ -622,7 +737,7 @@ stem + DW1 + PW1 + DW2 + PW2 = 16 + 4 + 32 + 4 + 48 = 104 DSP
 
 两种方案都保持中间 chunk 不被 DW 卡住，但 tap 串行会增加 DW 控制复杂度，并推迟冷启动时 PW1/PW2 第一次凑满 4 行的时间。
 
-### 8.4 第四步：stem 乘法转 LUT
+### 8.5 第五步：stem 乘法转 LUT 或低比特
 
 若目标只有约 90 个 DSP，`DW 转 LUT` 后的 96 DSP 仍可能偏高。下一步可以考虑把 stem 的 16 个乘法器也转 LUT：
 
@@ -641,7 +756,7 @@ stem + DW = LUT/shift-add
 
 因此不建议第一版就把 stem 放到 LUT。先验证全 DSP 或 DW-LUT 版本，再压 stem。
 
-### 8.5 不推荐优先做的优化
+### 8.6 不推荐优先做的优化
 
 不要优先减小 `PW1/PW2` 的 output-channel 并行度，因为当前参数已经基本是保持 560-cycle/chunk 的下限：
 
@@ -673,7 +788,9 @@ PW2 P_OC=12 基本是下限
 4. 或者把 stem 也降速，让系统 II 重新匹配。
 ```
 
-### 8.6 低精度和 DSP packing
+但在当前 LUT/DSP 已经超配的真实结果下，如果目标器件仍是当前规模，最终可能不得不牺牲 II，降低 PW1/PW2 并行度或时分复用 PW PE。只是这不应作为第一刀，因为它会直接拉长整窗前端 latency。
+
+### 8.7 低精度和 DSP packing
 
 当前文档按 16-bit Q8.8 计算。如果后续量化验证允许，可以把部分层降到：
 
@@ -693,12 +810,20 @@ acc:        32~48 bit
 
 但这不是纯硬件优化，需要重新做量化误差评估。第一版建议保留 16-bit Q8.8，等 RTL 功能和逐层误差闭环后，再做低比特实验。
 
-### 8.7 推荐实现顺序
+当前实测下，低比特不再只是“后续性能优化”，而是当前器件规模下可能必须做的资源优化方向。优先级建议：
+
+```text
+1. 先做只影响硬件映射、不影响算法权重的资源压缩。
+2. 再做 DW/stem/FC 局部低比特实验。
+3. 最后才做全网 activation/weight 低比特重标定。
+```
+
+### 8.8 推荐实现顺序
 
 | 版本 | DSP 估算 | LUT 压力 | II | 适用场景 |
 | --- | ---: | --- | ---: | --- |
-| all-DSP prototype，FC 独立 | 152 | 低 | 560 | 快速验证功能和时序 |
-| all-DSP frontend，FC 复用 | 136 | 低 | 560 | 150+ DSP 器件 |
+| 当前完整 RTL，FC 独立 ROM | 实测 240 | 实测极高 | 560 | 已验证功能和 timing，但当前器件放不下 |
+| all-DSP frontend，FC 复用/降并行 | 136+ | 中到高 | 560 | 先压 FC/AVG 资源 |
 | DW full-tap 转 LUT，FC 复用 | 96 | 中 | 560 | 100 DSP 左右器件 |
 | DW tap 串行 + DW LUT，FC 复用 | 96 | 低到中 | 560 | LUT 也较紧但希望保持 II |
 | stem + DW 转 LUT，FC 复用 | 80 | 高 | 560 | 90 DSP 左右器件，需重点看时序 |
@@ -707,10 +832,10 @@ acc:        32~48 bit
 当前最稳妥的路线是：
 
 ```text
-第一版: all-DSP frontend + FC 复用或独立均可
-第二版: DW 转 LUT/常系数乘法
-第三版: DW tap 串行
-第四版: stem 转 LUT 或低比特量化
+第一版: 当前 RTL 已完成功能和 100 MHz timing 验证
+第二版: 保持 accelerator 顶层，压 FC/AVG 的 DSP 和控制 LUT
+第三版: DW 常系数化或 tap 串行，避免 DSP 打满
+第四版: 局部低比特、stem 常系数化、必要时 PW 降并行
 ```
 
 真正需要优先保 DSP 的是 `PW1/PW2`，因为它们占主要 MAC 工作量且利用率高；DW 的计算量小、权重固定、全局利用率低，是最适合从 DSP 中移出去的部分。
@@ -814,7 +939,7 @@ valid_mask = 4'b0011
 
 ### 9.5 FC0 + ReLU + FC1
 
-第一版可保留独立轻量 FC：
+早期周期估算按“本地权重数组 + 理想 16-lane FC”理解：
 
 ```text
 P_OUT = 16
@@ -823,7 +948,28 @@ FC1 cycles = ceil(5 / 16) * 96 = 96
 total = 672 cycles
 ```
 
-如果继续压资源，FC 优先复用 PW2 或复用其中一部分 PE。
+当前实现已经改为：
+
+```text
+fc_classifier_96_5
+  -> fc_classifier_96_5_compute
+  -> fc_weight_controller_with_rom
+  -> blk_mem_gen_fc_weight
+
+FC ROM:
+  679 x 256-bit
+  FC0: 6 groups x 97 k
+  FC1: 97 k, lanes 0..4 valid
+
+GAP average:
+  AVG_LANES = 12
+  /174 改为 reciprocal multiply + shift:
+  AVG_RECIP_MUL=6170931, AVG_RECIP_SHIFT=30
+```
+
+因此当前 FC 周期应以 RTL 仿真为准，不再使用 672 cycles 作为最终延迟。full-top/accelerator 日志显示，接入 FC 后整帧约增加 2.8k cycles 量级；这对单帧 100 MHz 推理仍可接受，但 FC 独立乘法资源和控制逻辑需要作为下一轮资源压缩重点。
+
+如果继续压资源，FC 优先复用 PW2 或降低 FC0_OUT_LANES，而不是继续保留独立 16-lane FC。
 
 ---
 
@@ -893,6 +1039,9 @@ II   = 560 cycles / chunk
 3. 默认第一版建议保留 DW 5-tap parallel，因为 DW 总共 40 个乘法器，不是主要瓶颈。
 4. 若后续 DSP 仍紧，再启用 P_TAP=1 的 DW tap 串行方案，可把 DW 乘法器从 40 降到 8。
 5. 8-row 级间 FIFO 仍然足够，存储压力继续很小。
-6. all-DSP frontend 需要 136 个 DSP，适合 150+ DSP 级别器件；对 80~100 DSP 小 FPGA 偏紧。
-7. 最优先保 DSP 的是 PW1/PW2；DW 和后续可能的 stem 常系数乘法更适合转 LUT/shift-add。
+6. 当前完整 RTL 在截图口径下 timing 已满足 100 MHz：WNS=+1.823 ns，WHS=+0.056 ns。
+7. 当前完整 RTL 在 xc7k70t 口径下资源不可落地：LUT=250.48%，DSP=100%，FF=92.63%。
+8. 后续第一目标不是继续加深流水，而是在保持 timing 的前提下降 LUT/DSP/FF。
+9. 最优先保 DSP 的仍是 PW1/PW2；FC/AVG、DW 和后续可能的 stem 常系数乘法更适合做复用、低比特或常系数化。
+10. BRAM 当前只有 16.67%，可作为 LUT/FF 换空间的重要余量。
 ```

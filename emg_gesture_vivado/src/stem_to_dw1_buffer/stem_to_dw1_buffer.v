@@ -163,11 +163,11 @@ module stem_to_dw1_buffer #(
         if ((STEM_OC % OC_LANES) != 0) begin
             $error("stem_to_dw1_buffer: STEM_OC must be divisible by OC_LANES");
         end
-        if (RING_ROWS < (DW_K + ROWS)) begin
+        if (RING_ROWS < (ROWS * 2)) begin
             $error(
                 "stem_to_dw1_buffer: RING_ROWS %0d too small, need >= %0d",
                 RING_ROWS,
-                DW_K + ROWS
+                ROWS * 2
             );
         end
         if (BRAM_READ_LATENCY < 1) begin

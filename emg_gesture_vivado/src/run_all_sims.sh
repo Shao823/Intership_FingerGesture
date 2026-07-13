@@ -422,6 +422,7 @@ full_top_rtl=(
   "${SCRIPT_DIR}/fc_classifier_96_5/fc_weight_controller.v"
   "${SCRIPT_DIR}/fc_classifier_96_5/fc_weight_controller_with_rom.v"
   "${SCRIPT_DIR}/fc_classifier_96_5/fc_classifier_96_5.v"
+  "${SCRIPT_DIR}/emg_stream_fifo_slice.v"
   "${full_top_dir}/stem_dw1_pw1_dw2_pw2_pipeline_top.v"
   "${full_top_dir}/tb_stem_dw1_pw1_dw2_pw2_pipeline_top.v"
 )

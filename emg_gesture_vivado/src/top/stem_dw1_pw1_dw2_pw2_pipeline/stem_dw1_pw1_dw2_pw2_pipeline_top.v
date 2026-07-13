@@ -40,7 +40,10 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
     parameter integer ROWS_W     = 4,
     parameter integer LOW_TIME_W = 8,
     parameter integer DW2_ROWS_W = 3,
-    parameter integer RING_ROWS  = 16,
+    parameter integer STEM_TO_DW1_RING_ROWS = 8,
+    parameter integer DW1_TO_PW1_RING_ROWS  = 16,
+    parameter integer PW1_TO_DW2_RING_ROWS  = 8,
+    parameter integer DW2_TO_PW2_RING_ROWS  = 8,
     parameter integer PENDING_DEPTH = 8,
     parameter integer DW2_PENDING_DEPTH = 32,
     parameter integer BRAM_READ_LATENCY = 1,
@@ -184,12 +187,25 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
     localparam [DW2_PENDING_CNT_W-1:0] DW2_PENDING_DEPTH_COUNT = DW2_PENDING_DEPTH;
     localparam [ROWS_W-1:0] ROWS_VALUE = ROWS;
     localparam [DW2_ROWS_W-1:0] POOL_ROWS_VALUE = POOL_ROWS;
+    localparam integer STEM_TO_DW1_SLICE_DEPTH = 4;
+    localparam [PENDING_CNT_W-1:0] DW1_PENDING_LAUNCH_LIMIT =
+        PENDING_DEPTH - STEM_TO_DW1_SLICE_DEPTH;
+    localparam integer STEM_OUT_SLICE_W = TIME_W + 5
+        + (ROWS * STEM_OC_LANES * DATA_W);
+    localparam integer DW1_OUT_SLICE_W = TIME_W + 5
+        + (STEM_OC_LANES * DATA_W);
+    localparam integer PW1_OUT_SLICE_W = LOW_TIME_W + 6
+        + (POOL_ROWS * PW1_OC_LANES * DATA_W);
+    localparam integer DW2_OUT_SLICE_W = LOW_TIME_W + 6
+        + (CH_LANES * DATA_W);
     localparam integer PW2_FINAL_TILE_T_BASE = ((POOL_LEN - 1) / ROWS) * ROWS;
     localparam [LOW_TIME_W-1:0] PW2_FINAL_TILE_T_BASE_VALUE =
         PW2_FINAL_TILE_T_BASE;
 
     reg buffer_clear;
     reg pw2_gap_clear;
+    reg activation_load_bank;
+    reg activation_read_bank;
 
     reg stem_start;
     reg [4:0] stem_oc_base;
@@ -200,6 +216,14 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
     wire [TIME_W-1:0] stem_out_tile_t_base;
     wire [4:0] stem_out_tile_oc_base;
     wire signed [ROWS*STEM_OC_LANES*DATA_W-1:0] stem_out_tile;
+    wire stem_to_dw1_in_valid;
+    wire stem_to_dw1_in_ready;
+    wire stem_to_dw1_slice_busy;
+    wire [STEM_OUT_SLICE_W-1:0] stem_to_dw1_slice_in;
+    wire [STEM_OUT_SLICE_W-1:0] stem_to_dw1_slice_out;
+    wire [TIME_W-1:0] stem_to_dw1_out_tile_t_base;
+    wire [4:0] stem_to_dw1_out_tile_oc_base;
+    wire signed [ROWS*STEM_OC_LANES*DATA_W-1:0] stem_to_dw1_out_tile;
 
     wire dw1_win_req_valid;
     wire [TIME_W-1:0] dw1_win_req_out_t;
@@ -222,6 +246,14 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
     wire signed [STEM_OC_LANES*DATA_W-1:0] dw1_mid_out_vec;
     wire [TIME_W-1:0] dw1_job_out_t_start;
     wire [TIME_W:0] dw1_job_out_count;
+    wire dw1_to_pw1_in_valid;
+    wire dw1_to_pw1_in_ready;
+    wire dw1_to_pw1_slice_busy;
+    wire [DW1_OUT_SLICE_W-1:0] dw1_to_pw1_slice_in;
+    wire [DW1_OUT_SLICE_W-1:0] dw1_to_pw1_slice_out;
+    wire [TIME_W-1:0] dw1_to_pw1_out_t;
+    wire [4:0] dw1_to_pw1_out_ch_base;
+    wire signed [STEM_OC_LANES*DATA_W-1:0] dw1_to_pw1_out_vec;
 
     wire pw1_input_tile_req_valid;
     wire [TIME_W-1:0] pw1_input_tile_req_t_base;
@@ -245,6 +277,14 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
 
     wire pw1_to_dw2_in_valid;
     wire pw1_to_dw2_in_ready;
+    wire pw1_to_dw2_slice_valid;
+    wire pw1_to_dw2_out_ready;
+    wire pw1_to_dw2_slice_busy;
+    wire [PW1_OUT_SLICE_W-1:0] pw1_to_dw2_slice_in;
+    wire [PW1_OUT_SLICE_W-1:0] pw1_to_dw2_slice_out;
+    wire [LOW_TIME_W-1:0] pw1_to_dw2_pool_t_base;
+    wire [5:0] pw1_to_dw2_oc_base;
+    wire signed [POOL_ROWS*PW1_OC_LANES*DATA_W-1:0] pw1_to_dw2_tile;
     wire dw2_win_req_valid;
     wire dw2_win_req_ready;
     wire [LOW_TIME_W-1:0] dw2_win_req_out_t;
@@ -266,6 +306,14 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
     wire signed [CH_LANES*DATA_W-1:0] dw2_mid_out_vec;
     wire [LOW_TIME_W-1:0] dw2_job_out_t_start;
     wire [LOW_TIME_W:0] dw2_job_out_count;
+    wire dw2_to_pw2_in_valid;
+    wire dw2_to_pw2_in_ready;
+    wire dw2_to_pw2_slice_busy;
+    wire [DW2_OUT_SLICE_W-1:0] dw2_to_pw2_slice_in;
+    wire [DW2_OUT_SLICE_W-1:0] dw2_to_pw2_slice_out;
+    wire [LOW_TIME_W-1:0] dw2_to_pw2_out_t;
+    wire [5:0] dw2_to_pw2_out_ch_base;
+    wire signed [CH_LANES*DATA_W-1:0] dw2_to_pw2_out_vec;
 
     wire pw2_input_tile_req_valid;
     wire [LOW_TIME_W-1:0] pw2_input_tile_req_t_base;
@@ -342,6 +390,7 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
     wire dw1_mid_out_fire;
     wire pw1_out_fire;
     wire dw2_mid_out_fire;
+    wire activation_read_active;
 
     integer rst_i;
 
@@ -349,7 +398,7 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
     assign dw1_pending_count_after_pop = dw1_pending_count
         - {{(PENDING_CNT_W-1){1'b0}}, dw1_pending_pop};
     assign dw1_pending_launch_room = (dw1_pending_count_after_pop
-        < (PENDING_DEPTH_COUNT - 1'b1));
+        < DW1_PENDING_LAUNCH_LIMIT);
     assign scheduler_dw1_pending_full = busy && !dw1_pending_launch_room;
     assign dw1_pending_count_dbg = dw1_pending_count;
     assign dw2_pending_empty = (dw2_pending_count == {DW2_PENDING_CNT_W{1'b0}});
@@ -365,6 +414,7 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
     assign fc_class_idx = fc_class_idx_wire;
     assign fc_input_count_error = fc_input_count_error_wire;
     assign fc_logits_vec = fc_logits_vec_wire;
+    assign activation_read_active = busy || start;
 
     assign stem_issue_now = busy
         && !buffer_clear
@@ -396,15 +446,61 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         && !pw2_busy
         && !pw2_start;
 
-    assign dw1_pending_push = busy && stem_done;
+    assign stem_to_dw1_slice_in = {
+        stem_out_tile_t_base,
+        stem_out_tile_oc_base,
+        stem_out_tile
+    };
+    assign {
+        stem_to_dw1_out_tile_t_base,
+        stem_to_dw1_out_tile_oc_base,
+        stem_to_dw1_out_tile
+    } = stem_to_dw1_slice_out;
+
+    assign dw1_pending_push = busy
+        && stem_to_dw1_in_valid
+        && stem_to_dw1_in_ready;
     assign dw1_pending_pop = dw1_start_now;
     assign dw1_pending_count_next = dw1_pending_count
         + {{(PENDING_CNT_W-1){1'b0}}, dw1_pending_push}
         - {{(PENDING_CNT_W-1){1'b0}}, dw1_pending_pop};
 
-    assign pw1_to_dw2_in_valid = pw1_out_valid && dw2_pending_room;
-    assign pw1_out_ready = pw1_to_dw2_in_ready && dw2_pending_room;
-    assign dw2_pending_push = pw1_out_fire;
+    assign dw1_to_pw1_slice_in = {
+        dw1_mid_out_t,
+        dw1_mid_out_ch_base,
+        dw1_mid_out_vec
+    };
+    assign {
+        dw1_to_pw1_out_t,
+        dw1_to_pw1_out_ch_base,
+        dw1_to_pw1_out_vec
+    } = dw1_to_pw1_slice_out;
+
+    assign pw1_to_dw2_slice_in = {
+        pw1_out_pool_t_base[LOW_TIME_W-1:0],
+        pw1_out_oc_base,
+        pw1_out_tile
+    };
+    assign {
+        pw1_to_dw2_pool_t_base,
+        pw1_to_dw2_oc_base,
+        pw1_to_dw2_tile
+    } = pw1_to_dw2_slice_out;
+    assign pw1_to_dw2_in_valid = pw1_to_dw2_slice_valid && dw2_pending_room;
+    assign pw1_to_dw2_out_ready = pw1_to_dw2_in_ready && dw2_pending_room;
+    assign dw2_pending_push = pw1_to_dw2_in_valid && pw1_to_dw2_in_ready;
+
+    assign dw2_to_pw2_slice_in = {
+        dw2_mid_out_t,
+        dw2_mid_out_ch_base,
+        dw2_mid_out_vec
+    };
+    assign {
+        dw2_to_pw2_out_t,
+        dw2_to_pw2_out_ch_base,
+        dw2_to_pw2_out_vec
+    } = dw2_to_pw2_slice_out;
+
     assign dw2_pending_pop = dw2_start_now;
     assign dw2_pending_count_next = dw2_pending_count
         + {{(DW2_PENDING_CNT_W-1){1'b0}}, dw2_pending_push}
@@ -430,6 +526,8 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         && !dw1_busy
         && !dw1_start
         && !dw1_mid_out_valid
+        && !stem_to_dw1_slice_busy
+        && !dw1_to_pw1_slice_busy
         && !stem_to_dw1_wr_busy
         && !stem_to_dw1_rd_busy
         && !dw1_to_pw1_wr_busy
@@ -443,8 +541,10 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         && !dw2_busy
         && !dw2_start
         && !dw2_mid_out_valid
+        && !pw1_to_dw2_slice_busy
         && !pw1_to_dw2_wr_busy
         && !pw1_to_dw2_rd_busy
+        && !dw2_to_pw2_slice_busy
         && !dw2_to_pw2_wr_busy
         && !dw2_to_pw2_rd_busy
         && all_pw2_issued
@@ -476,6 +576,9 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         end
         if (PENDING_DEPTH < 2) begin
             $error("stem_dw1_pw1_dw2_pw2_pipeline_top: PENDING_DEPTH must be >= 2");
+        end
+        if (PENDING_DEPTH <= STEM_TO_DW1_SLICE_DEPTH) begin
+            $error("stem_dw1_pw1_dw2_pw2_pipeline_top: PENDING_DEPTH must exceed stem output slice depth");
         end
         if (DW2_PENDING_DEPTH < 2) begin
             $error("stem_dw1_pw1_dw2_pw2_pipeline_top: DW2_PENDING_DEPTH must be >= 2");
@@ -559,6 +662,9 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .act_wr_en(act_wr_en),
         .act_wr_addr(act_wr_addr),
         .act_wr_data(act_wr_data),
+        .act_wr_bank(activation_load_bank),
+        .act_rd_bank(activation_read_bank),
+        .act_rd_active(activation_read_active),
         .act_wr_ready(act_wr_ready),
         .w_fold_we(stem_w_fold_we),
         .w_fold_oc(stem_w_fold_oc),
@@ -575,6 +681,22 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .out_tile(stem_out_tile)
     );
 
+    emg_stream_fifo_slice #(
+        .DATA_W(STEM_OUT_SLICE_W),
+        .DEPTH(STEM_TO_DW1_SLICE_DEPTH)
+    ) u_stem_to_dw1_ready_slice (
+        .clk(clk),
+        .rst_n(rst_n),
+        .clear(buffer_clear),
+        .in_valid(stem_out_valid),
+        .in_ready(stem_to_buffer_ready),
+        .in_data(stem_to_dw1_slice_in),
+        .out_valid(stem_to_dw1_in_valid),
+        .out_ready(stem_to_dw1_in_ready),
+        .out_data(stem_to_dw1_slice_out),
+        .busy(stem_to_dw1_slice_busy)
+    );
+
     stem_to_dw1_buffer_with_ram #(
         .DATA_W(DATA_W),
         .TIME_W(TIME_W),
@@ -584,7 +706,7 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .OC_LANES(STEM_OC_LANES),
         .DW_K(DW_K),
         .DW_PAD(DW_PAD),
-        .RING_ROWS(RING_ROWS),
+        .RING_ROWS(STEM_TO_DW1_RING_ROWS),
         .BANKS(CH_GROUPS),
         .BRAM_READ_LATENCY(BRAM_READ_LATENCY),
         .OC_BASE_W(STEM_OC_BASE_W)
@@ -592,11 +714,11 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .clk(clk),
         .rst_n(rst_n),
         .clear(buffer_clear),
-        .stem_out_valid(stem_out_valid),
-        .stem_out_ready(stem_to_buffer_ready),
-        .stem_out_tile_t_base(stem_out_tile_t_base),
-        .stem_out_tile_oc_base(stem_out_tile_oc_base),
-        .stem_out_tile(stem_out_tile),
+        .stem_out_valid(stem_to_dw1_in_valid),
+        .stem_out_ready(stem_to_dw1_in_ready),
+        .stem_out_tile_t_base(stem_to_dw1_out_tile_t_base),
+        .stem_out_tile_oc_base(stem_to_dw1_out_tile_oc_base),
+        .stem_out_tile(stem_to_dw1_out_tile),
         .dw1_win_req_valid(dw1_win_req_valid),
         .dw1_win_req_ready(dw1_win_req_ready),
         .dw1_win_req_out_t(dw1_win_req_out_t),
@@ -650,6 +772,22 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .job_out_count(dw1_job_out_count)
     );
 
+    emg_stream_fifo_slice #(
+        .DATA_W(DW1_OUT_SLICE_W),
+        .DEPTH(4)
+    ) u_dw1_to_pw1_ready_slice (
+        .clk(clk),
+        .rst_n(rst_n),
+        .clear(buffer_clear),
+        .in_valid(dw1_mid_out_valid),
+        .in_ready(dw1_mid_out_ready),
+        .in_data(dw1_to_pw1_slice_in),
+        .out_valid(dw1_to_pw1_in_valid),
+        .out_ready(dw1_to_pw1_in_ready),
+        .out_data(dw1_to_pw1_slice_out),
+        .busy(dw1_to_pw1_slice_busy)
+    );
+
     dw1_to_pw1_buffer_with_ram #(
         .DATA_W(DATA_W),
         .TIME_W(TIME_W),
@@ -657,7 +795,7 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .PW1_IC(STEM_OC),
         .ROWS(ROWS),
         .CH_LANES(STEM_OC_LANES),
-        .RING_ROWS(RING_ROWS),
+        .RING_ROWS(DW1_TO_PW1_RING_ROWS),
         .BANKS(CH_GROUPS),
         .BRAM_READ_LATENCY(BRAM_READ_LATENCY),
         .CH_BASE_W(PW1_CH_BASE_W)
@@ -665,11 +803,11 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .clk(clk),
         .rst_n(rst_n),
         .clear(buffer_clear),
-        .dw1_out_valid(dw1_mid_out_valid),
-        .dw1_out_ready(dw1_mid_out_ready),
-        .dw1_out_t(dw1_mid_out_t),
-        .dw1_out_ch_base({1'b0, dw1_mid_out_ch_base}),
-        .dw1_out_vec(dw1_mid_out_vec),
+        .dw1_out_valid(dw1_to_pw1_in_valid),
+        .dw1_out_ready(dw1_to_pw1_in_ready),
+        .dw1_out_t(dw1_to_pw1_out_t),
+        .dw1_out_ch_base({1'b0, dw1_to_pw1_out_ch_base}),
+        .dw1_out_vec(dw1_to_pw1_out_vec),
         .input_tile_req_valid(pw1_input_tile_req_valid),
         .input_tile_req_ready(pw1_input_tile_req_ready),
         .input_tile_req_t_base(pw1_input_tile_req_t_base),
@@ -729,6 +867,22 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .out_tile(pw1_out_tile)
     );
 
+    emg_stream_fifo_slice #(
+        .DATA_W(PW1_OUT_SLICE_W),
+        .DEPTH(4)
+    ) u_pw1_to_dw2_ready_slice (
+        .clk(clk),
+        .rst_n(rst_n),
+        .clear(buffer_clear),
+        .in_valid(pw1_out_valid),
+        .in_ready(pw1_out_ready),
+        .in_data(pw1_to_dw2_slice_in),
+        .out_valid(pw1_to_dw2_slice_valid),
+        .out_ready(pw1_to_dw2_out_ready),
+        .out_data(pw1_to_dw2_slice_out),
+        .busy(pw1_to_dw2_slice_busy)
+    );
+
     pw1_to_dw2_buffer_with_ram #(
         .DATA_W(DATA_W),
         .TIME_W(LOW_TIME_W),
@@ -739,7 +893,7 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .CH_LANES(CH_LANES),
         .DW_K(DW_K),
         .DW_PAD(DW_PAD),
-        .RING_ROWS(RING_ROWS),
+        .RING_ROWS(PW1_TO_DW2_RING_ROWS),
         .BANKS(PW1_OC / CH_LANES),
         .TILE_BANKS(PW1_OC_LANES / CH_LANES),
         .BRAM_READ_LATENCY(BRAM_READ_LATENCY),
@@ -750,9 +904,9 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .clear(buffer_clear),
         .pw1_out_valid(pw1_to_dw2_in_valid),
         .pw1_out_ready(pw1_to_dw2_in_ready),
-        .pw1_out_pool_t_base(pw1_out_pool_t_base[LOW_TIME_W-1:0]),
-        .pw1_out_oc_base(pw1_out_oc_base),
-        .pw1_out_tile(pw1_out_tile),
+        .pw1_out_pool_t_base(pw1_to_dw2_pool_t_base),
+        .pw1_out_oc_base(pw1_to_dw2_oc_base),
+        .pw1_out_tile(pw1_to_dw2_tile),
         .dw2_win_req_valid(dw2_win_req_valid),
         .dw2_win_req_ready(dw2_win_req_ready),
         .dw2_win_req_out_t(dw2_win_req_out_t),
@@ -806,6 +960,22 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .job_out_count(dw2_job_out_count)
     );
 
+    emg_stream_fifo_slice #(
+        .DATA_W(DW2_OUT_SLICE_W),
+        .DEPTH(4)
+    ) u_dw2_to_pw2_ready_slice (
+        .clk(clk),
+        .rst_n(rst_n),
+        .clear(buffer_clear),
+        .in_valid(dw2_mid_out_valid),
+        .in_ready(dw2_mid_out_ready),
+        .in_data(dw2_to_pw2_slice_in),
+        .out_valid(dw2_to_pw2_in_valid),
+        .out_ready(dw2_to_pw2_in_ready),
+        .out_data(dw2_to_pw2_slice_out),
+        .busy(dw2_to_pw2_slice_busy)
+    );
+
     dw2_to_pw2_buffer_with_ram #(
         .DATA_W(DATA_W),
         .TIME_W(LOW_TIME_W),
@@ -813,7 +983,7 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .PW2_IC(PW1_OC),
         .ROWS(ROWS),
         .CH_LANES(CH_LANES),
-        .RING_ROWS(RING_ROWS),
+        .RING_ROWS(DW2_TO_PW2_RING_ROWS),
         .BANKS(PW1_OC / CH_LANES),
         .BRAM_READ_LATENCY(BRAM_READ_LATENCY),
         .CH_BASE_W(PW2_CH_BASE_W)
@@ -821,11 +991,11 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
         .clk(clk),
         .rst_n(rst_n),
         .clear(buffer_clear),
-        .dw2_out_valid(dw2_mid_out_valid),
-        .dw2_out_ready(dw2_mid_out_ready),
-        .dw2_out_t(dw2_mid_out_t),
-        .dw2_out_ch_base({1'b0, dw2_mid_out_ch_base}),
-        .dw2_out_vec(dw2_mid_out_vec),
+        .dw2_out_valid(dw2_to_pw2_in_valid),
+        .dw2_out_ready(dw2_to_pw2_in_ready),
+        .dw2_out_t(dw2_to_pw2_out_t),
+        .dw2_out_ch_base({1'b0, dw2_to_pw2_out_ch_base}),
+        .dw2_out_vec(dw2_to_pw2_out_vec),
         .input_tile_req_valid(pw2_input_tile_req_valid),
         .input_tile_req_ready(pw2_input_tile_req_ready),
         .input_tile_req_t_base(pw2_input_tile_req_t_base),
@@ -921,6 +1091,8 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
             done <= 1'b0;
             buffer_clear <= 1'b0;
             pw2_gap_clear <= 1'b0;
+            activation_load_bank <= 1'b0;
+            activation_read_bank <= 1'b0;
             stem_start <= 1'b0;
             stem_oc_base <= 5'd0;
             stem_tile_t_base <= {TIME_W{1'b0}};
@@ -1015,6 +1187,8 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
                 busy <= 1'b1;
                 buffer_clear <= 1'b1;
                 pw2_gap_clear <= 1'b1;
+                activation_read_bank <= activation_load_bank;
+                activation_load_bank <= !activation_load_bank;
                 all_stem_issued <= 1'b0;
                 next_tile_t_base <= {TIME_W{1'b0}};
                 next_ch_base <= 5'd0;
@@ -1153,9 +1327,12 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
                 end
 
                 if (dw1_pending_push) begin
-                    dw1_pending_t_base[dw1_pending_wr_ptr] <= launched_t_base;
-                    dw1_pending_ch_base[dw1_pending_wr_ptr] <= launched_ch_base;
-                    dw1_pending_final_chunk[dw1_pending_wr_ptr] <= launched_final_chunk;
+                    dw1_pending_t_base[dw1_pending_wr_ptr]
+                        <= stem_to_dw1_out_tile_t_base;
+                    dw1_pending_ch_base[dw1_pending_wr_ptr]
+                        <= stem_to_dw1_out_tile_oc_base;
+                    dw1_pending_final_chunk[dw1_pending_wr_ptr]
+                        <= is_final_tile(stem_to_dw1_out_tile_t_base);
                     dw1_pending_wr_ptr <= next_dw1_pending_ptr(dw1_pending_wr_ptr);
                     stem_jobs_done <= stem_jobs_done + 1'b1;
                 end
@@ -1183,11 +1360,12 @@ module stem_dw1_pw1_dw2_pw2_pipeline_top #(
 
                 if (dw2_pending_push) begin
                     dw2_pending_t_base[dw2_pending_wr_ptr]
-                        <= pw1_out_pool_t_base[LOW_TIME_W-1:0];
-                    dw2_pending_ch_base[dw2_pending_wr_ptr] <= pw1_out_oc_base;
+                        <= pw1_to_dw2_pool_t_base;
+                    dw2_pending_ch_base[dw2_pending_wr_ptr]
+                        <= pw1_to_dw2_oc_base;
                     dw2_pending_final_chunk[dw2_pending_wr_ptr]
                         <= is_final_dw2_input_chunk(
-                            pw1_out_pool_t_base[LOW_TIME_W-1:0]
+                            pw1_to_dw2_pool_t_base
                         );
                     dw2_pending_wr_ptr
                         <= next_dw2_pending_ptr(dw2_pending_wr_ptr);

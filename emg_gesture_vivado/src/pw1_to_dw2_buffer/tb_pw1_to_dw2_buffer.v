@@ -30,7 +30,7 @@ module `PW1_TO_DW2_TB_MODULE;
     localparam integer CH_LANES   = 4;
     localparam integer DW_K       = 5;
     localparam integer DW_PAD     = 2;
-    localparam integer RING_ROWS  = 16;
+    localparam integer RING_ROWS  = 8;
     localparam integer BANKS      = PW1_OC / CH_LANES;
     localparam integer WORD_W     = CH_LANES * DATA_W;
     localparam integer TILE_W     = POOL_ROWS * PW1_OC_LANES * DATA_W;
@@ -612,13 +612,16 @@ module `PW1_TO_DW2_TB_MODULE;
             reset_dut();
             for (scan_t = 0; scan_t < 16; scan_t = scan_t + POOL_ROWS) begin
                 write_all_groups(scan_t);
-            end
-
-            for (scan_out_t = 0; scan_out_t < 14; scan_out_t = scan_out_t + 1) begin
-                for (scan_ch = 0;
-                     scan_ch < PW1_OC;
-                     scan_ch = scan_ch + CH_LANES) begin
-                    request_window_expect(scan_out_t, scan_ch, 0);
+                if (scan_t >= DW_PAD) begin
+                    for (scan_out_t = scan_t - DW_PAD;
+                         scan_out_t < scan_t;
+                         scan_out_t = scan_out_t + 1) begin
+                        for (scan_ch = 0;
+                             scan_ch < PW1_OC;
+                             scan_ch = scan_ch + CH_LANES) begin
+                            request_window_expect(scan_out_t, scan_ch, 0);
+                        end
+                    end
                 end
             end
             $display("INFO pw1_to_dw2 subset_stream_scan complete");
@@ -628,11 +631,11 @@ module `PW1_TO_DW2_TB_MODULE;
     task concurrent_write_read_case;
         begin
             reset_dut();
-            for (scan_t = 0; scan_t < 16; scan_t = scan_t + POOL_ROWS) begin
+            for (scan_t = 0; scan_t < 8; scan_t = scan_t + POOL_ROWS) begin
                 write_tile(scan_t, 0);
             end
 
-            for (scan_t = 0; scan_t < 14; scan_t = scan_t + POOL_ROWS) begin
+            for (scan_t = 0; scan_t < 6; scan_t = scan_t + POOL_ROWS) begin
                 write_tile(scan_t, 32);
                 #1;
                 if (wr_busy !== 1'b1) begin
@@ -656,26 +659,26 @@ module `PW1_TO_DW2_TB_MODULE;
             write_tile(2, PW1_OC - PW1_OC_LANES);
             write_tile(0, 0);
             write_tile(2, 0);
-            write_tile(8, 0);
-            write_tile(10, 0);
-            write_tile(12, 0);
+            write_tile(4, 0);
 
-            request_window_expect(10, 0, 0);
-            request_window_expect(10, CH_LANES, 0);
+            request_window_expect(2, 0, 0);
+            request_window_expect(2, CH_LANES, 0);
+            request_window_expect(3, 0, 0);
+            request_window_expect(3, CH_LANES, 0);
             #1;
             if (`PW1_TO_DW2_CTRL.served_valid[0] !== 1'b1
-                || `PW1_TO_DW2_CTRL.served_out_t[0] !== 8'd10) begin
+                || `PW1_TO_DW2_CTRL.served_out_t[0] !== 8'd3) begin
                 $display(
-                    "ERROR bank0 served state got valid=%0d out_t=%0d expected 10",
+                    "ERROR bank0 served state got valid=%0d out_t=%0d expected 3",
                     `PW1_TO_DW2_CTRL.served_valid[0],
                     `PW1_TO_DW2_CTRL.served_out_t[0]
                 );
                 errors = errors + 1;
             end
             if (`PW1_TO_DW2_CTRL.served_valid[1] !== 1'b1
-                || `PW1_TO_DW2_CTRL.served_out_t[1] !== 8'd10) begin
+                || `PW1_TO_DW2_CTRL.served_out_t[1] !== 8'd3) begin
                 $display(
-                    "ERROR bank1 served state got valid=%0d out_t=%0d expected 10",
+                    "ERROR bank1 served state got valid=%0d out_t=%0d expected 3",
                     `PW1_TO_DW2_CTRL.served_valid[1],
                     `PW1_TO_DW2_CTRL.served_out_t[1]
                 );
@@ -686,11 +689,11 @@ module `PW1_TO_DW2_TB_MODULE;
                 errors = errors + 1;
             end
 
-            write_tile(16, 0);
+            write_tile(8, 0);
             request_window_expect(0, PW1_OC - CH_LANES, 0);
             #1;
             if (`PW1_TO_DW2_CTRL.served_valid[0] !== 1'b1
-                || `PW1_TO_DW2_CTRL.served_out_t[0] !== 8'd10) begin
+                || `PW1_TO_DW2_CTRL.served_out_t[0] !== 8'd3) begin
                 $display(
                     "ERROR bank0 served state changed after bank15 request out_t=%0d",
                     `PW1_TO_DW2_CTRL.served_out_t[0]
@@ -706,7 +709,7 @@ module `PW1_TO_DW2_TB_MODULE;
                 );
                 errors = errors + 1;
             end
-            expect_write_blocked_cycles(16, PW1_OC - PW1_OC_LANES, 2);
+            expect_write_blocked_cycles(8, PW1_OC - PW1_OC_LANES, 2);
             $display("INFO pw1_to_dw2 bank_served_independence_case complete");
         end
     endtask

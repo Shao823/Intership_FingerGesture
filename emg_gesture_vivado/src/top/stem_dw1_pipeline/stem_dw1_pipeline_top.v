@@ -102,6 +102,11 @@ module stem_dw1_pipeline_top #(
     localparam integer OC_BASE_W = 5;
     localparam [PENDING_CNT_W-1:0] PENDING_DEPTH_COUNT = PENDING_DEPTH;
     localparam [ROWS_W-1:0] ROWS_VALUE = ROWS;
+    localparam integer STEM_TO_DW1_SLICE_DEPTH = 4;
+    localparam [PENDING_CNT_W-1:0] PENDING_LAUNCH_LIMIT =
+        PENDING_DEPTH - STEM_TO_DW1_SLICE_DEPTH;
+    localparam integer STEM_OUT_SLICE_W = TIME_W + 5
+        + (ROWS * OC_LANES * DATA_W);
 
     reg buffer_clear;
 
@@ -114,6 +119,14 @@ module stem_dw1_pipeline_top #(
     wire [TIME_W-1:0] stem_out_tile_t_base;
     wire [4:0] stem_out_tile_oc_base;
     wire signed [ROWS*OC_LANES*DATA_W-1:0] stem_out_tile;
+    wire stem_to_dw1_in_valid;
+    wire stem_to_dw1_in_ready;
+    wire stem_to_dw1_slice_busy;
+    wire [STEM_OUT_SLICE_W-1:0] stem_to_dw1_slice_in;
+    wire [STEM_OUT_SLICE_W-1:0] stem_to_dw1_slice_out;
+    wire [TIME_W-1:0] stem_to_dw1_out_tile_t_base;
+    wire [4:0] stem_to_dw1_out_tile_oc_base;
+    wire signed [ROWS*OC_LANES*DATA_W-1:0] stem_to_dw1_out_tile;
 
     wire dw1_win_req_valid;
     wire [TIME_W-1:0] dw1_win_req_out_t;
@@ -162,11 +175,10 @@ module stem_dw1_pipeline_top #(
     assign pending_empty = (pending_count == {PENDING_CNT_W{1'b0}});
     assign pending_count_after_pop = pending_count
         - {{(PENDING_CNT_W-1){1'b0}}, pending_pop};
-    // A launched stem job will enqueue one DW1 job when its output tile is
-    // accepted. Reserve that future slot so long DW1 stalls cannot overflow the
-    // pending-job FIFO.
+    // Reserve room for stem tiles already accepted into the output slice but not
+    // yet enqueued as DW1 jobs.
     assign pending_launch_room = (pending_count_after_pop
-        < (PENDING_DEPTH_COUNT - 1'b1));
+        < PENDING_LAUNCH_LIMIT);
     assign scheduler_pending_full = busy && !pending_launch_room;
     assign pending_count_dbg = pending_count;
 
@@ -182,7 +194,20 @@ module stem_dw1_pipeline_top #(
         && !dw1_busy
         && !dw1_start;
 
-    assign pending_push = busy && stem_done;
+    assign stem_to_dw1_slice_in = {
+        stem_out_tile_t_base,
+        stem_out_tile_oc_base,
+        stem_out_tile
+    };
+    assign {
+        stem_to_dw1_out_tile_t_base,
+        stem_to_dw1_out_tile_oc_base,
+        stem_to_dw1_out_tile
+    } = stem_to_dw1_slice_out;
+
+    assign pending_push = busy
+        && stem_to_dw1_in_valid
+        && stem_to_dw1_in_ready;
     assign pending_pop = dw1_start_now;
     assign pending_count_next = pending_count
         + {{(PENDING_CNT_W-1){1'b0}}, pending_push}
@@ -200,6 +225,7 @@ module stem_dw1_pipeline_top #(
         && !dw1_busy
         && !dw1_start
         && !dw1_out_valid
+        && !stem_to_dw1_slice_busy
         && !buffer_wr_busy
         && !buffer_rd_busy;
 
@@ -209,6 +235,9 @@ module stem_dw1_pipeline_top #(
         end
         if (PENDING_DEPTH < 2) begin
             $error("stem_dw1_pipeline_top: PENDING_DEPTH must be >= 2");
+        end
+        if (PENDING_DEPTH <= STEM_TO_DW1_SLICE_DEPTH) begin
+            $error("stem_dw1_pipeline_top: PENDING_DEPTH must exceed stem output slice depth");
         end
     end
 
@@ -256,6 +285,9 @@ module stem_dw1_pipeline_top #(
         .act_wr_en(act_wr_en),
         .act_wr_addr(act_wr_addr),
         .act_wr_data(act_wr_data),
+        .act_wr_bank(1'b0),
+        .act_rd_bank(1'b0),
+        .act_rd_active(busy || start),
         .act_wr_ready(act_wr_ready),
         .w_fold_we(stem_w_fold_we),
         .w_fold_oc(stem_w_fold_oc),
@@ -270,6 +302,22 @@ module stem_dw1_pipeline_top #(
         .out_tile_t_base(stem_out_tile_t_base),
         .out_tile_oc_base(stem_out_tile_oc_base),
         .out_tile(stem_out_tile)
+    );
+
+    emg_stream_fifo_slice #(
+        .DATA_W(STEM_OUT_SLICE_W),
+        .DEPTH(STEM_TO_DW1_SLICE_DEPTH)
+    ) u_stem_to_dw1_ready_slice (
+        .clk(clk),
+        .rst_n(rst_n),
+        .clear(buffer_clear),
+        .in_valid(stem_out_valid),
+        .in_ready(stem_to_buffer_ready),
+        .in_data(stem_to_dw1_slice_in),
+        .out_valid(stem_to_dw1_in_valid),
+        .out_ready(stem_to_dw1_in_ready),
+        .out_data(stem_to_dw1_slice_out),
+        .busy(stem_to_dw1_slice_busy)
     );
 
     stem_to_dw1_buffer_with_ram #(
@@ -289,11 +337,11 @@ module stem_dw1_pipeline_top #(
         .clk(clk),
         .rst_n(rst_n),
         .clear(buffer_clear),
-        .stem_out_valid(stem_out_valid),
-        .stem_out_ready(stem_to_buffer_ready),
-        .stem_out_tile_t_base(stem_out_tile_t_base),
-        .stem_out_tile_oc_base(stem_out_tile_oc_base),
-        .stem_out_tile(stem_out_tile),
+        .stem_out_valid(stem_to_dw1_in_valid),
+        .stem_out_ready(stem_to_dw1_in_ready),
+        .stem_out_tile_t_base(stem_to_dw1_out_tile_t_base),
+        .stem_out_tile_oc_base(stem_to_dw1_out_tile_oc_base),
+        .stem_out_tile(stem_to_dw1_out_tile),
         .dw1_win_req_valid(dw1_win_req_valid),
         .dw1_win_req_ready(dw1_win_req_ready),
         .dw1_win_req_out_t(dw1_win_req_out_t),
@@ -466,9 +514,12 @@ module stem_dw1_pipeline_top #(
                 end
 
                 if (pending_push) begin
-                    pending_t_base[pending_wr_ptr] <= launched_t_base;
-                    pending_ch_base[pending_wr_ptr] <= launched_ch_base;
-                    pending_final_chunk[pending_wr_ptr] <= launched_final_chunk;
+                    pending_t_base[pending_wr_ptr]
+                        <= stem_to_dw1_out_tile_t_base;
+                    pending_ch_base[pending_wr_ptr]
+                        <= stem_to_dw1_out_tile_oc_base;
+                    pending_final_chunk[pending_wr_ptr]
+                        <= is_final_tile(stem_to_dw1_out_tile_t_base);
                     pending_wr_ptr <= next_pending_ptr(pending_wr_ptr);
                     stem_jobs_done <= stem_jobs_done + 1'b1;
                 end

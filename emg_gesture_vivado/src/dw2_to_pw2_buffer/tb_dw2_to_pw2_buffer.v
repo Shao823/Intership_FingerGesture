@@ -25,7 +25,7 @@ module `DW2_TO_PW2_TB_MODULE;
     localparam integer PW2_IC     = 64;
     localparam integer ROWS       = 4;
     localparam integer CH_LANES   = 4;
-    localparam integer RING_ROWS  = 16;
+    localparam integer RING_ROWS  = 8;
     localparam integer BANKS      = PW2_IC / CH_LANES;
     localparam integer WORD_W     = CH_LANES * DATA_W;
     localparam integer ACT_W      = ROWS * DATA_W;
@@ -660,9 +660,15 @@ module `DW2_TO_PW2_TB_MODULE;
             input_tile_req_row_valid_mask = FULL_MASK;
             input_tile_req_valid = 1'b1;
             #1;
-            if (input_tile_req_ready !== 1'b1) begin
-                $display("ERROR clear_during_load initial tile ready low");
-                errors = errors + 1;
+            timeout_count = 0;
+            while (input_tile_req_ready !== 1'b1) begin
+                @(negedge clk);
+                timeout_count = timeout_count + 1;
+                if (timeout_count > TIMEOUT) begin
+                    $display("ERROR clear_during_load tile request timeout");
+                    errors = errors + 1;
+                    disable clear_during_load_case;
+                end
             end
             @(posedge clk);
             @(negedge clk);

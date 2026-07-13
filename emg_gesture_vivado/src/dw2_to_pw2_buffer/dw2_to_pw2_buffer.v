@@ -149,12 +149,22 @@ module dw2_to_pw2_buffer #(
     reg tile_params_valid_c;
     reg tile_available_c;
     reg act_req_params_valid_c;
+    reg tile_req_pending;
+    reg tile_req_ready_q;
+    reg [TIME_W-1:0] tile_req_t_base_q;
+    reg [ROWS-1:0] tile_req_row_valid_mask_q;
+    reg tile_req_pending_params_valid_c;
+    reg tile_req_pending_available_c;
 
     integer wr_comb_idx;
     integer tile_comb_row;
     integer tile_comb_t;
     integer tile_comb_idx;
     reg [TIME_W-1:0] tile_comb_t_vec;
+    integer pending_tile_comb_row;
+    integer pending_tile_comb_t;
+    integer pending_tile_comb_idx;
+    reg [TIME_W-1:0] pending_tile_comb_t_vec;
     integer full_bank;
     integer full_idx;
     integer rst_bank;
@@ -165,11 +175,11 @@ module dw2_to_pw2_buffer #(
         if ((PW2_IC % CH_LANES) != 0) begin
             $error("dw2_to_pw2_buffer: PW2_IC must be divisible by CH_LANES");
         end
-        if (RING_ROWS < (ROWS * 4)) begin
+        if (RING_ROWS < (ROWS * 2)) begin
             $error(
                 "dw2_to_pw2_buffer: RING_ROWS %0d too small, need >= %0d",
                 RING_ROWS,
-                ROWS * 4
+                ROWS * 2
             );
         end
         if (BRAM_READ_LATENCY < 1) begin
@@ -192,8 +202,8 @@ module dw2_to_pw2_buffer #(
 
     assign input_tile_req_ready = !clear
         && (rd_state == RD_IDLE)
-        && tile_params_valid_c
-        && tile_available_c;
+        && tile_req_pending
+        && tile_req_ready_q;
     assign tile_req_fire = input_tile_req_valid && input_tile_req_ready;
 
     assign act_req_ready = !clear
@@ -310,9 +320,74 @@ module dw2_to_pw2_buffer #(
     end
 
     always @* begin
+        tile_req_pending_params_valid_c =
+            (tile_req_row_valid_mask_q != {ROWS{1'b0}});
+        tile_req_pending_available_c = tile_req_pending_params_valid_c;
+        pending_tile_comb_t = 0;
+        pending_tile_comb_idx = 0;
+        pending_tile_comb_t_vec = {TIME_W{1'b0}};
+
+        for (pending_tile_comb_row = 0;
+             pending_tile_comb_row < ROWS;
+             pending_tile_comb_row = pending_tile_comb_row + 1) begin
+            if (tile_req_row_valid_mask_q[pending_tile_comb_row]) begin
+                pending_tile_comb_t = tile_req_t_base_q + pending_tile_comb_row;
+                if (pending_tile_comb_t >= INPUT_LEN) begin
+                    tile_req_pending_params_valid_c = 1'b0;
+                    tile_req_pending_available_c = 1'b0;
+                end
+            end
+        end
+
+        if (tile_req_pending_params_valid_c) begin
+            for (pending_tile_comb_row = 0;
+                 pending_tile_comb_row < ROWS;
+                 pending_tile_comb_row = pending_tile_comb_row + 1) begin
+                if (tile_req_row_valid_mask_q[pending_tile_comb_row]) begin
+                    pending_tile_comb_t = tile_req_t_base_q + pending_tile_comb_row;
+                    pending_tile_comb_idx = pending_tile_comb_t % RING_ROWS;
+                    pending_tile_comb_t_vec = pending_tile_comb_t;
+                    if (!slot_has_time(
+                            row_full_valid[pending_tile_comb_idx[ROW_IDX_W-1:0]],
+                            row_full_tag[pending_tile_comb_idx[ROW_IDX_W-1:0]],
+                            pending_tile_comb_t_vec
+                        )) begin
+                        tile_req_pending_available_c = 1'b0;
+                    end
+                end
+            end
+        end
+    end
+
+    always @* begin
         act_req_params_valid_c = (act_req_t_base == rd_tile_t_base)
             && (act_req_k < PW2_IC)
             && (act_req_row_valid_mask == rd_row_valid_mask);
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n || clear) begin
+            tile_req_pending <= 1'b0;
+            tile_req_ready_q <= 1'b0;
+            tile_req_t_base_q <= {TIME_W{1'b0}};
+            tile_req_row_valid_mask_q <= {ROWS{1'b0}};
+        end else if ((rd_state != RD_IDLE) || tile_req_fire) begin
+            tile_req_pending <= 1'b0;
+            tile_req_ready_q <= 1'b0;
+        end else if (!input_tile_req_valid) begin
+            tile_req_pending <= 1'b0;
+            tile_req_ready_q <= 1'b0;
+        end else if (!tile_req_pending) begin
+            tile_req_ready_q <= 1'b0;
+            if (tile_params_valid_c) begin
+                tile_req_pending <= 1'b1;
+                tile_req_t_base_q <= input_tile_req_t_base;
+                tile_req_row_valid_mask_q <= input_tile_req_row_valid_mask;
+                tile_req_ready_q <= tile_available_c;
+            end
+        end else begin
+            tile_req_ready_q <= tile_req_pending_available_c;
+        end
     end
 
     function [ADDR_W-1:0] calc_sample_addr;
@@ -595,8 +670,8 @@ module dw2_to_pw2_buffer #(
                     act_resp_count <= {LOAD_W{1'b0}};
                     act_resp_valid <= 1'b0;
                     if (tile_req_fire) begin
-                        rd_tile_t_base <= input_tile_req_t_base;
-                        rd_row_valid_mask <= input_tile_req_row_valid_mask;
+                        rd_tile_t_base <= tile_req_t_base_q;
+                        rd_row_valid_mask <= tile_req_row_valid_mask_q;
                         rd_state <= RD_LOAD;
                     end
                 end

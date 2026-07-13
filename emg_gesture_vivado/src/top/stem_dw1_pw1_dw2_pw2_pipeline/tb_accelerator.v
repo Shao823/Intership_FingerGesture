@@ -160,13 +160,14 @@ module tb_accelerator #(
         end
     endtask
 
-    task launch_case;
+    task run_preloaded_case_with_optional_next_load;
         input integer case_idx;
+        input integer load_next_case;
+        input integer next_case_idx;
         begin
             current_case = case_idx;
             class_seen = 0;
             class_observed = 3'd0;
-            load_activation_ram(case_idx);
 
             hold_cycles = START_HOLD_CYCLES;
             if (hold_cycles < 1) begin
@@ -177,6 +178,23 @@ module tb_accelerator #(
             start = 1'b1;
             repeat (hold_cycles) @(negedge clk);
             start = 1'b0;
+
+            if (load_next_case) begin
+                $display(
+                    "INFO accelerator ping-pong preload case=%0d while case=%0d is running",
+                    next_case_idx,
+                    case_idx
+                );
+                load_activation_ram(next_case_idx);
+                if (busy !== 1'b1) begin
+                    $display(
+                        "ERROR accelerator ping-pong preload finished after current case stopped case=%0d next=%0d",
+                        case_idx,
+                        next_case_idx
+                    );
+                    errors = errors + 1;
+                end
+            end
 
             timeout = 0;
             while ((done !== 1'b1) && (timeout < TIMEOUT)) begin
@@ -222,6 +240,14 @@ module tb_accelerator #(
         end
     endtask
 
+    task launch_case;
+        input integer case_idx;
+        begin
+            load_activation_ram(case_idx);
+            run_preloaded_case_with_optional_next_load(case_idx, 0, 0);
+        end
+    endtask
+
     initial begin
         clk = 1'b0;
         rst_n = 1'b0;
@@ -238,8 +264,16 @@ module tb_accelerator #(
             case_limit = N_CASES;
         end
 
+        if (case_limit > 0) begin
+            load_activation_ram(0);
+        end
+
         for (case_i = 0; case_i < case_limit; case_i = case_i + 1) begin
-            launch_case(case_i);
+            run_preloaded_case_with_optional_next_load(
+                case_i,
+                (case_i + 1) < case_limit,
+                case_i + 1
+            );
         end
 
         if (errors == 0) begin

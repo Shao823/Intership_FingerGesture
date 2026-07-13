@@ -594,9 +594,15 @@ module `DW1_TO_PW1_TB_MODULE;
             input_tile_req_t_base = {TIME_W{1'b0}};
             input_tile_req_valid = 1'b1;
             #1;
-            if (input_tile_req_ready !== 1'b1) begin
-                $display("ERROR clear_during_load initial tile ready low");
-                errors = errors + 1;
+            timeout_count = 0;
+            while (input_tile_req_ready !== 1'b1) begin
+                @(negedge clk);
+                timeout_count = timeout_count + 1;
+                if (timeout_count > TIMEOUT) begin
+                    $display("ERROR clear_during_load tile request timeout");
+                    errors = errors + 1;
+                    disable clear_during_load_case;
+                end
             end
             @(posedge clk);
             @(negedge clk);

@@ -727,21 +727,14 @@ module tb_stem_dw1_pw1_dw2_pw2_pipeline_top #(
                 $display("ERROR fc_jobs_done got=%0d expected=1", fc_jobs_done);
                 errors = errors + 1;
             end
-            if (dw1_to_pw1_overwrite_stall_cycles != 0
-                || pw1_to_dw2_overwrite_stall_cycles != 0
-                || dw2_to_pw2_overwrite_stall_cycles != 0) begin
-                $display("ERROR overwrite stalls d1p1=%0d p1d2=%0d d2p2=%0d",
-                    dw1_to_pw1_overwrite_stall_cycles,
-                    pw1_to_dw2_overwrite_stall_cycles,
-                    dw2_to_pw2_overwrite_stall_cycles);
-                errors = errors + 1;
-            end
         end
     endtask
 
-    task launch_case_with_start_hold;
+    task run_preloaded_case_with_optional_next_load;
         input integer case_idx;
         input integer start_hold_cycles;
+        input integer load_next_case;
+        input integer next_case_idx;
         integer hold_cycles;
         begin
             hold_cycles = start_hold_cycles;
@@ -752,12 +745,28 @@ module tb_stem_dw1_pw1_dw2_pw2_pipeline_top #(
             current_case = case_idx;
             case_error_start = errors;
             clear_scoreboard();
-            load_activation_ram(case_idx);
 
             @(negedge clk);
             start = 1'b1;
             repeat (hold_cycles) @(negedge clk);
             start = 1'b0;
+
+            if (load_next_case) begin
+                $display(
+                    "INFO ping-pong preload case=%0d while case=%0d is running",
+                    next_case_idx,
+                    case_idx
+                );
+                load_activation_ram(next_case_idx);
+                if (busy !== 1'b1) begin
+                    $display(
+                        "ERROR ping-pong preload finished after current case stopped case=%0d next=%0d",
+                        case_idx,
+                        next_case_idx
+                    );
+                    errors = errors + 1;
+                end
+            end
 
             timeout = 0;
             while ((done !== 1'b1) && (timeout < TIMEOUT)) begin
@@ -808,7 +817,7 @@ module tb_stem_dw1_pw1_dw2_pw2_pipeline_top #(
                 check_gap();
                 check_fc_result();
                 $display(
-                    "CASE %0d cycles=%0d gap_count=%0d class=%0d stem=%0d dw1_rows=%0d pw1_out=%0d dw2_rows=%0d pw2_tiles=%0d fc=%0d/%0d max_dw1_pending=%0d max_dw2_pending=%0d waits p1=%0d p2=%0d stalls d1=%0d d2=%0d errors_delta=%0d",
+                    "CASE %0d cycles=%0d gap_count=%0d class=%0d stem=%0d dw1_rows=%0d pw1_out=%0d dw2_rows=%0d pw2_tiles=%0d fc=%0d/%0d max_dw1_pending=%0d max_dw2_pending=%0d waits p1=%0d p2=%0d stalls d1=%0d d2=%0d overwrite d1p1=%0d p1d2=%0d d2p2=%0d errors_delta=%0d",
                     case_idx,
                     cycle_count,
                     gap_count,
@@ -826,11 +835,28 @@ module tb_stem_dw1_pw1_dw2_pw2_pipeline_top #(
                     pw2_input_wait_cycles,
                     dw1_output_stall_cycles,
                     dw2_output_stall_cycles,
+                    dw1_to_pw1_overwrite_stall_cycles,
+                    pw1_to_dw2_overwrite_stall_cycles,
+                    dw2_to_pw2_overwrite_stall_cycles,
                     errors - case_error_start
                 );
             end
 
             repeat (8) @(posedge clk);
+        end
+    endtask
+
+    task launch_case_with_start_hold;
+        input integer case_idx;
+        input integer start_hold_cycles;
+        begin
+            load_activation_ram(case_idx);
+            run_preloaded_case_with_optional_next_load(
+                case_idx,
+                start_hold_cycles,
+                0,
+                0
+            );
         end
     endtask
 
@@ -954,8 +980,17 @@ module tb_stem_dw1_pw1_dw2_pw2_pipeline_top #(
             case_limit = N_CASES;
         end
 
+        if (case_limit > 0) begin
+            load_activation_ram(0);
+        end
+
         for (case_i = 0; case_i < case_limit; case_i = case_i + 1) begin
-            launch_case(case_i);
+            run_preloaded_case_with_optional_next_load(
+                case_i,
+                1,
+                (case_i + 1) < case_limit,
+                case_i + 1
+            );
         end
 
         if (RUN_CONTINUOUS_START_CASE) begin
@@ -1106,23 +1141,17 @@ module blk_mem_gen_stem_to_dw_conv1 (
     input wire clka,
     input wire ena,
     input wire [0:0] wea,
-    input wire [6:0] addra,
+    input wire [5:0] addra,
     input wire [63:0] dina,
-    output reg [63:0] douta,
     input wire clkb,
     input wire enb,
-    input wire [0:0] web,
-    input wire [6:0] addrb,
-    input wire [63:0] dinb,
+    input wire [5:0] addrb,
     output reg [63:0] doutb
 );
-    reg [63:0] mem [0:127];
-    reg [6:0] addra_d;
-    reg [6:0] addrb_d;
-    reg ena_d;
+    reg [63:0] mem [0:63];
+    reg [5:0] addrb_d;
     reg enb_d;
     initial begin
-        ena_d = 1'b0;
         enb_d = 1'b0;
     end
     always @(posedge clka) begin
@@ -1130,18 +1159,10 @@ module blk_mem_gen_stem_to_dw_conv1 (
             if (wea[0]) begin
                 mem[addra] <= dina;
             end
-            addra_d <= addra;
         end
-        if (ena_d) begin
-            douta <= mem[addra_d];
-        end
-        ena_d <= ena;
     end
     always @(posedge clkb) begin
         if (enb) begin
-            if (web[0]) begin
-                mem[addrb] <= dinb;
-            end
             addrb_d <= addrb;
         end
         if (enb_d) begin
@@ -1204,19 +1225,19 @@ module blk_mem_gen_pw_to_dw_conv2 (
     input wire clka,
     input wire ena,
     input wire [0:0] wea,
-    input wire [7:0] addra,
+    input wire [6:0] addra,
     input wire [63:0] dina,
     output reg [63:0] douta,
     input wire clkb,
     input wire enb,
     input wire [0:0] web,
-    input wire [7:0] addrb,
+    input wire [6:0] addrb,
     input wire [63:0] dinb,
     output reg [63:0] doutb
 );
-    reg [63:0] mem [0:255];
-    reg [7:0] addra_d;
-    reg [7:0] addrb_d;
+    reg [63:0] mem [0:127];
+    reg [6:0] addra_d;
+    reg [6:0] addrb_d;
     reg ena_d;
     reg enb_d;
     initial begin
@@ -1253,19 +1274,19 @@ module blk_mem_gen_dw_to_pw_conv2 (
     input wire clka,
     input wire ena,
     input wire [0:0] wea,
-    input wire [7:0] addra,
+    input wire [6:0] addra,
     input wire [63:0] dina,
     output reg [63:0] douta,
     input wire clkb,
     input wire enb,
     input wire [0:0] web,
-    input wire [7:0] addrb,
+    input wire [6:0] addrb,
     input wire [63:0] dinb,
     output reg [63:0] doutb
 );
-    reg [63:0] mem [0:255];
-    reg [7:0] addra_d;
-    reg [7:0] addrb_d;
+    reg [63:0] mem [0:127];
+    reg [6:0] addra_d;
+    reg [6:0] addrb_d;
     reg ena_d;
     reg enb_d;
     initial begin
