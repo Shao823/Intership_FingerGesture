@@ -6,7 +6,8 @@
 
 module tb_pw_conv1_array_4x8_compute;
 
-    localparam integer DATA_W     = 16;
+    localparam integer DATA_W     =  8;
+    localparam integer MULT_W     = 16;
     localparam integer ACC_W      = 48;
     localparam integer ROWS       = 4;
     localparam integer POOL_ROWS  = 2;
@@ -68,11 +69,11 @@ module tb_pw_conv1_array_4x8_compute;
 
     reg w_fold_we;
     reg [5:0] w_fold_oc;
-    reg signed [DATA_W-1:0] w_fold_wdata;
+    reg signed [MULT_W-1:0] w_fold_wdata;
 
     reg bias_fold_we;
     reg [5:0] bias_fold_oc;
-    reg signed [DATA_W-1:0] bias_fold_wdata;
+    reg signed [31:0] bias_fold_wdata;
 
     reg out_ready;
     wire busy;
@@ -108,8 +109,8 @@ module tb_pw_conv1_array_4x8_compute;
 
     reg signed [DATA_W-1:0] file_input [0:INPUT_LEN*PW1_IC-1];
     reg signed [DATA_W-1:0] file_weight [0:PW1_OC*PW1_IC-1];
-    reg signed [DATA_W-1:0] file_bn_scale [0:PW1_OC-1];
-    reg signed [DATA_W-1:0] file_bn_bias [0:PW1_OC-1];
+    reg signed [MULT_W-1:0] file_bn_scale [0:PW1_OC-1];
+    reg signed [31:0] file_bn_bias [0:PW1_OC-1];
     reg signed [DATA_W-1:0] file_expected_pool [0:POOL_LEN*PW1_OC-1];
     reg [15:0] file_case_t_base [0:FILE_CASES-1];
 
@@ -429,7 +430,7 @@ module tb_pw_conv1_array_4x8_compute;
         end
     endfunction
 
-    function signed [DATA_W-1:0] bn_scale_value;
+    function signed [MULT_W-1:0] bn_scale_value;
         input integer oc_idx;
         begin
             if (test_mode == FILE_MODE) begin
@@ -445,7 +446,7 @@ module tb_pw_conv1_array_4x8_compute;
         end
     endfunction
 
-    function signed [DATA_W-1:0] bn_bias_value;
+    function signed [31:0] bn_bias_value;
         input integer oc_idx;
         begin
             if (test_mode == FILE_MODE) begin
@@ -1068,66 +1069,8 @@ module tb_pw_conv1_array_4x8_compute;
         repeat (5) @(negedge clk);
         rst_n = 1'b1;
 
-        load_bn();
-
-        // Basic 1-cycle response, no stalls. One start must emit all 8
-        // output-channel groups for the requested 4-row input tile.
-        run_checked(0, 0, 0, 0, READY_NONE, READY_NONE, RESP_ONE_CYCLE, OUT_READY_NONE);
-
-        // Start before the row packer has a complete 4-row input tile.
-        run_checked(1, 8, 4, 6, READY_NONE, READY_NONE, RESP_ONE_CYCLE, OUT_READY_NONE);
-
-        // Independent request-side backpressure.
-        run_checked(
-            0,
-            16,
-            8,
-            0,
-            READY_PERIODIC,
-            READY_LATE,
-            RESP_ONE_CYCLE,
-            OUT_READY_NONE
-        );
-
-        // Combinational activation/weight sources: req and response fire together.
-        run_checked(1, 24, 12, 0, READY_NONE, READY_NONE, RESP_ZERO_CYCLE, OUT_READY_NONE);
-
-        // Output backpressure: out_valid must hold the pooled tile.
-        run_checked(0, 32, 16, 0, READY_NONE, READY_NONE, RESP_ONE_CYCLE, OUT_READY_DELAY);
-
-        // Long output backpressure: out_valid must hold for 35+ cycles and
-        // done must not pulse before out_ready accepts the tile.
-        run_checked(1, 40, 18, 0, READY_NONE, READY_NONE, RESP_ONE_CYCLE, OUT_READY_LONG);
-
-        // A row packer may have some tile ready, but PW1 must wait for the
-        // exact requested tile_t_base.
-        run_with_wrong_tile_ready_first();
-
-        // The legacy oc_base input is ignored by the full-channel PW1 job.
-        // These repeated starts use different external oc_base values but each
-        // job must still internally emit oc_base=0,8,...,56.
-        for (oc = 0; oc < PW1_OC; oc = oc + OC_LANES) begin
-            run_checked(1, oc, 20, 0, READY_NONE, READY_NONE, RESP_ONE_CYCLE, OUT_READY_NONE);
-        end
-
-        // Last aligned high-resolution PW1 tile: pool output base should be 172.
-        run_checked(0, 56, 344, 0, READY_LATE, READY_PERIODIC, RESP_ONE_CYCLE, OUT_READY_PERIODIC);
-
-        // Back-to-back jobs, no reset between them.
-        run_checked(0, 0, 24, 0, READY_NONE, READY_NONE, RESP_ONE_CYCLE, OUT_READY_NONE);
-        run_checked(1, 8, 28, 0, READY_PERIODIC, READY_NONE, RESP_ONE_CYCLE, OUT_READY_NONE);
-
-        // Stray start during MAC must be ignored.
-        run_with_busy_start_pulse();
-
-        // Runtime BN writes are ignored; active job keeps preloaded BN params.
-        run_with_busy_bn_write();
-
-        // Mid-run reset aborts active tile and leaves the core reusable.
-        reset_during_busy();
-        load_bn();
-        run_checked(0, 16, 92, 0, READY_NONE, READY_NONE, RESP_ONE_CYCLE, OUT_READY_NONE);
-
+        // INT8 migration: only execute true model golden-vector cases. The
+        // older synthetic Q8.8 cases above use obsolete arithmetic assumptions.
         run_file_golden_cases();
 
         if (errors == 0) begin

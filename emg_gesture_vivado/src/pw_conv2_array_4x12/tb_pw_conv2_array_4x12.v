@@ -6,7 +6,8 @@
 
 module tb_pw_conv2_array_4x12;
 
-    localparam integer DATA_W     = 16;
+    localparam integer DATA_W     =  8;
+    localparam integer MULT_W     = 16;
     localparam integer ACC_W      = 48;
     localparam integer ROWS       = 4;
     localparam integer OC_LANES   = 12;
@@ -48,11 +49,11 @@ module tb_pw_conv2_array_4x12;
 
     reg w_fold_we;
     reg [6:0] w_fold_oc;
-    reg signed [DATA_W-1:0] w_fold_wdata;
+    reg signed [MULT_W-1:0] w_fold_wdata;
 
     reg bias_fold_we;
     reg [6:0] bias_fold_oc;
-    reg signed [DATA_W-1:0] bias_fold_wdata;
+    reg signed [31:0] bias_fold_wdata;
 
     wire busy;
     wire done;
@@ -88,8 +89,8 @@ module tb_pw_conv2_array_4x12;
     reg signed [ACC_W-1:0] expected_gap_sum [0:PW2_OC-1];
     reg signed [DATA_W-1:0] file_input [0:INPUT_LEN*PW2_IC-1];
     reg [OC_LANES*DATA_W-1:0] packed_weight_mem [0:OC_GROUPS*PW2_IC-1];
-    reg signed [DATA_W-1:0] bn_scale_mem [0:PW2_OC-1];
-    reg signed [DATA_W-1:0] bn_bias_mem [0:PW2_OC-1];
+    reg signed [MULT_W-1:0] bn_scale_mem [0:PW2_OC-1];
+    reg signed [31:0] bn_bias_mem [0:PW2_OC-1];
 
     assign input_tile_req_fire_tb = input_tile_req_valid && input_tile_req_ready;
     assign act_req_fire_tb = act_req_valid && act_req_ready;
@@ -667,18 +668,18 @@ module tb_pw_conv2_array_4x12;
                 $display("ERROR PW2 top bn_bias.mem did not load");
                 errors = errors + 1;
             end
-            if (dut.u_compute.w_fold_mem[0] !== bn_scale_mem[0]) begin
+            if (dut.u_compute.multiplier_q15_mem[0] !== bn_scale_mem[0]) begin
                 $display(
                     "ERROR PW2 top BN scale autoload mismatch got=%h expected=%h",
-                    dut.u_compute.w_fold_mem[0],
+                    dut.u_compute.multiplier_q15_mem[0],
                     bn_scale_mem[0]
                 );
                 errors = errors + 1;
             end
-            if (dut.u_compute.bias_fold_mem[0] !== bn_bias_mem[0]) begin
+            if (dut.u_compute.bias_int32_mem[0] !== bn_bias_mem[0]) begin
                 $display(
                     "ERROR PW2 top BN bias autoload mismatch got=%h expected=%h",
-                    dut.u_compute.bias_fold_mem[0],
+                    dut.u_compute.bias_int32_mem[0],
                     bn_bias_mem[0]
                 );
                 errors = errors + 1;

@@ -6,7 +6,8 @@
 
 module tb_stem_activation_controller_with_ram;
 
-    localparam integer DATA_W     = 16;
+    localparam integer DATA_W     =  8;
+    localparam integer MULT_W     = 16;
     localparam integer ROWS       = 4;
     localparam integer INPUT_LEN  = 348;
     localparam integer STEM_IC    = 5;

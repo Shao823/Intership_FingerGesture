@@ -1,0 +1,262 @@
+{
+  "format": "Q8.8 signed int16, one value per line, PyTorch natural (out, in, k) C-order flatten",
+  "tensors": {
+    "stem_conv_weight": {
+      "pytorch_key": "stem.0.weight",
+      "hex_file": "stem_conv_weight.hex",
+      "shape": [
+        32,
+        5,
+        7
+      ],
+      "num_elements": 1120,
+      "absmax_input": 0.3022645115852356,
+      "absmax_q88": 77.37971496582031,
+      "overflow_count": 0
+    },
+    "stem_bn_gamma": {
+      "pytorch_key": "stem.1.weight",
+      "hex_file": "stem_bn_gamma.hex",
+      "shape": [
+        32
+      ],
+      "num_elements": 32,
+      "absmax_input": 1.0876272916793823,
+      "absmax_q88": 278.4325866699219,
+      "overflow_count": 0
+    },
+    "stem_bn_beta": {
+      "pytorch_key": "stem.1.bias",
+      "hex_file": "stem_bn_beta.hex",
+      "shape": [
+        32
+      ],
+      "num_elements": 32,
+      "absmax_input": 0.26262086629867554,
+      "absmax_q88": 67.23094177246094,
+      "overflow_count": 0
+    },
+    "stem_bn_mean": {
+      "pytorch_key": "stem.1.running_mean",
+      "hex_file": "stem_bn_mean.hex",
+      "shape": [
+        32
+      ],
+      "num_elements": 32,
+      "absmax_input": 0.011141061782836914,
+      "absmax_q88": 2.85211181640625,
+      "overflow_count": 0
+    },
+    "stem_bn_var": {
+      "pytorch_key": "stem.1.running_var",
+      "hex_file": "stem_bn_var.hex",
+      "shape": [
+        32
+      ],
+      "num_elements": 32,
+      "absmax_input": 0.7413603663444519,
+      "absmax_q88": 189.7882537841797,
+      "overflow_count": 0
+    },
+    "dw1_weight": {
+      "pytorch_key": "block1.depthwise.weight",
+      "hex_file": "dw1_weight.hex",
+      "shape": [
+        32,
+        1,
+        5
+      ],
+      "num_elements": 160,
+      "absmax_input": 0.5159281492233276,
+      "absmax_q88": 132.07760620117188,
+      "overflow_count": 0
+    },
+    "pw1_weight": {
+      "pytorch_key": "block1.pointwise.weight",
+      "hex_file": "pw1_weight.hex",
+      "shape": [
+        64,
+        32,
+        1
+      ],
+      "num_elements": 2048,
+      "absmax_input": 0.372193843126297,
+      "absmax_q88": 95.28162384033203,
+      "overflow_count": 0
+    },
+    "bn1_gamma": {
+      "pytorch_key": "block1_tail.0.weight",
+      "hex_file": "bn1_gamma.hex",
+      "shape": [
+        64
+      ],
+      "num_elements": 64,
+      "absmax_input": 1.115338921546936,
+      "absmax_q88": 285.5267639160156,
+      "overflow_count": 0
+    },
+    "bn1_beta": {
+      "pytorch_key": "block1_tail.0.bias",
+      "hex_file": "bn1_beta.hex",
+      "shape": [
+        64
+      ],
+      "num_elements": 64,
+      "absmax_input": 0.16808290779590607,
+      "absmax_q88": 43.02922439575195,
+      "overflow_count": 0
+    },
+    "bn1_mean": {
+      "pytorch_key": "block1_tail.0.running_mean",
+      "hex_file": "bn1_mean.hex",
+      "shape": [
+        64
+      ],
+      "num_elements": 64,
+      "absmax_input": 0.5075090527534485,
+      "absmax_q88": 129.9223175048828,
+      "overflow_count": 0
+    },
+    "bn1_var": {
+      "pytorch_key": "block1_tail.0.running_var",
+      "hex_file": "bn1_var.hex",
+      "shape": [
+        64
+      ],
+      "num_elements": 64,
+      "absmax_input": 0.23219335079193115,
+      "absmax_q88": 59.441497802734375,
+      "overflow_count": 0
+    },
+    "dw2_weight": {
+      "pytorch_key": "block2.depthwise.weight",
+      "hex_file": "dw2_weight.hex",
+      "shape": [
+        64,
+        1,
+        5
+      ],
+      "num_elements": 320,
+      "absmax_input": 0.5252112746238708,
+      "absmax_q88": 134.45408630371094,
+      "overflow_count": 0
+    },
+    "pw2_weight": {
+      "pytorch_key": "block2.pointwise.weight",
+      "hex_file": "pw2_weight.hex",
+      "shape": [
+        96,
+        64,
+        1
+      ],
+      "num_elements": 6144,
+      "absmax_input": 0.28333786129951477,
+      "absmax_q88": 72.53449249267578,
+      "overflow_count": 0
+    },
+    "bn2_gamma": {
+      "pytorch_key": "block2_tail.0.weight",
+      "hex_file": "bn2_gamma.hex",
+      "shape": [
+        96
+      ],
+      "num_elements": 96,
+      "absmax_input": 1.1636309623718262,
+      "absmax_q88": 297.8895263671875,
+      "overflow_count": 0
+    },
+    "bn2_beta": {
+      "pytorch_key": "block2_tail.0.bias",
+      "hex_file": "bn2_beta.hex",
+      "shape": [
+        96
+      ],
+      "num_elements": 96,
+      "absmax_input": 0.11638619005680084,
+      "absmax_q88": 29.794864654541016,
+      "overflow_count": 0
+    },
+    "bn2_mean": {
+      "pytorch_key": "block2_tail.0.running_mean",
+      "hex_file": "bn2_mean.hex",
+      "shape": [
+        96
+      ],
+      "num_elements": 96,
+      "absmax_input": 0.6859912276268005,
+      "absmax_q88": 175.61375427246094,
+      "overflow_count": 0
+    },
+    "bn2_var": {
+      "pytorch_key": "block2_tail.0.running_var",
+      "hex_file": "bn2_var.hex",
+      "shape": [
+        96
+      ],
+      "num_elements": 96,
+      "absmax_input": 0.1395188719034195,
+      "absmax_q88": 35.71683120727539,
+      "overflow_count": 0
+    },
+    "fc0_weight": {
+      "pytorch_key": "embedding.weight",
+      "hex_file": "fc0_weight.hex",
+      "shape": [
+        96,
+        96
+      ],
+      "num_elements": 9216,
+      "absmax_input": 0.2765566110610962,
+      "absmax_q88": 70.79849243164062,
+      "overflow_count": 0
+    },
+    "fc0_bias": {
+      "pytorch_key": "embedding.bias",
+      "hex_file": "fc0_bias.hex",
+      "shape": [
+        96
+      ],
+      "num_elements": 96,
+      "absmax_input": 0.13500365614891052,
+      "absmax_q88": 34.560935974121094,
+      "overflow_count": 0
+    },
+    "fc1_weight": {
+      "pytorch_key": "classifier.weight",
+      "hex_file": "fc1_weight.hex",
+      "shape": [
+        5,
+        96
+      ],
+      "num_elements": 480,
+      "absmax_input": 0.5013085603713989,
+      "absmax_q88": 128.33499145507812,
+      "overflow_count": 0
+    },
+    "fc1_bias": {
+      "pytorch_key": "classifier.bias",
+      "hex_file": "fc1_bias.hex",
+      "shape": [
+        5
+      ],
+      "num_elements": 5,
+      "absmax_input": 0.12091533839702606,
+      "absmax_q88": 30.954326629638672,
+      "overflow_count": 0
+    }
+  },
+  "skipped": [
+    {
+      "key": "stem.1.num_batches_tracked",
+      "reason": "BN counter, not a weight"
+    },
+    {
+      "key": "block1_tail.0.num_batches_tracked",
+      "reason": "BN counter, not a weight"
+    },
+    {
+      "key": "block2_tail.0.num_batches_tracked",
+      "reason": "BN counter, not a weight"
+    }
+  ]
+}

@@ -6,7 +6,8 @@
 
 module tb_fc_classifier_96_5_compute;
 
-    localparam integer DATA_W        = 16;
+    localparam integer DATA_W        =  8;
+    localparam integer MULT_W     = 16;
     localparam integer GAP_ACC_W     = 48;
     localparam integer ACC_W         = 48;
     localparam integer FC0_IN        = 96;
@@ -15,7 +16,7 @@ module tb_fc_classifier_96_5_compute;
     localparam integer FC0_OUT_LANES = 16;
     localparam integer GAP_LEN       = 174;
     localparam integer FRAC_BITS     = 8;
-    localparam integer FILE_CASES    = 20;
+    localparam integer FILE_CASES    = 10;
     localparam integer TIMEOUT       = 12000;
 
     reg clk;

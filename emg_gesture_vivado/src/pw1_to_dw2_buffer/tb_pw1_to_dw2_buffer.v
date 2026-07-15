@@ -21,7 +21,8 @@ module `PW1_TO_DW2_TB_MODULE;
     parameter integer RUN_SUBSET_SCAN = 0;
 `endif
 
-    localparam integer DATA_W     = 16;
+    localparam integer DATA_W     =  8;
+    localparam integer MULT_W     = 16;
     localparam integer TIME_W     = 8;
     localparam integer INPUT_LEN  = 174;
     localparam integer PW1_OC     = 64;

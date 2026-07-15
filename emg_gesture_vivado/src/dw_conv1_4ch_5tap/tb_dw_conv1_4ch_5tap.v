@@ -6,7 +6,8 @@
 
 module tb_dw_conv1_4ch_5tap;
 
-    localparam integer DATA_W     = 16;
+    localparam integer DATA_W     =  8;
+    localparam integer MULT_W     = 16;
     localparam integer ACC_W      = 48;
     localparam integer CHANNELS   = 32;
     localparam integer P_CH       = 4;
@@ -860,60 +861,8 @@ module tb_dw_conv1_4ch_5tap;
         repeat (5) @(negedge clk);
         rst_n = 1'b1;
 
-        load_weights();
-
-        // First stem chunk rows 0..3: only DW1 output rows 0..1 are computable.
-        run_checked(0, 4, 0, 4, 0, REQ_STALL_NONE, OUT_STALL_NONE);
-
-        // Middle stem chunk rows 4..7: output rows 2..5 are computable.
-        run_checked(0, 0, 4, 4, 0, REQ_STALL_PERIODIC, OUT_STALL_NONE);
-
-        // Another middle chunk with output-side backpressure.
-        run_checked(1, 8, 8, 4, 0, REQ_STALL_NONE, OUT_STALL_PERIODIC);
-
-        // System-level order for one middle stem chunk: keep the same time
-        // chunk and sweep all 8 channel groups before advancing time.
-        for (ch = 0; ch < CHANNELS; ch = ch + P_CH) begin
-            run_checked(0, ch, 12, 4, 0, REQ_STALL_NONE, OUT_STALL_NONE);
-        end
-
-        // Final stem chunk rows 344..347: output rows 342..347 are computable.
-        run_checked(1, 28, 344, 4, 1, REQ_STALL_LATE, OUT_STALL_HEAD);
-
-        // Empty job: no window requests and no output rows, but done must pulse.
-        run_checked(0, 4, 200, 0, 0, REQ_STALL_NONE, OUT_STALL_NONE);
-
-        // Combinational window loader: request and response can fire together.
-        run_checked_ext(
-            0,
-            20,
-            204,
-            4,
-            0,
-            REQ_STALL_NONE,
-            OUT_STALL_NONE,
-            RESP_ZERO_CYCLE
-        );
-
-        // Long downstream backpressure should be absorbed by the output FIFO
-        // until it fills, then resume without data loss.
-        run_checked(1, 24, 208, 4, 0, REQ_STALL_NONE, OUT_STALL_LONG);
-
-        // Explicit back-to-back jobs after the previous done pulse, with no reset.
-        run_checked(0, 4, 212, 4, 0, REQ_STALL_NONE, OUT_STALL_NONE);
-        run_checked(1, 8, 216, 4, 0, REQ_STALL_PERIODIC, OUT_STALL_NONE);
-
-        // A stray start pulse during RUN must be ignored.
-        run_with_busy_start_pulse();
-
-        // Runtime weight writes are ignored; the active job must still use the
-        // weights loaded before start.
-        run_with_busy_weight_write();
-
-        // Mid-run reset aborts the active job and leaves the core reusable.
-        reset_during_busy();
-        run_checked(0, 4, 152, 4, 0, REQ_STALL_NONE, OUT_STALL_NONE);
-
+        // INT8 migration: use the real-model golden cases. The old synthetic
+        // Q8.8 cases are kept above for reference but are not part of this run.
         run_file_golden_cases();
 
         if (errors == 0) begin

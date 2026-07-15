@@ -8,7 +8,8 @@ module tb_stem_weight_controller #(
     parameter integer BRAM_READ_LATENCY = 1
 );
 
-    localparam integer DATA_W     = 16;
+    localparam integer DATA_W     =  8;
+    localparam integer MULT_W     = 16;
     localparam integer OC_LANES   = 4;
     localparam integer STEM_OC    = 32;
     localparam integer STEM_K     = 35;

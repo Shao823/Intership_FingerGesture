@@ -6,7 +6,8 @@
 
 module tb_fc_weight_controller_with_rom;
 
-    localparam integer DATA_W        = 16;
+    localparam integer DATA_W        =  8;
+    localparam integer MULT_W     = 16;
     localparam integer FC0_IN        = 96;
     localparam integer FC0_OUT       = 96;
     localparam integer FC1_OUT       = 5;
@@ -194,9 +195,9 @@ module blk_mem_gen_fc_weight (
     input wire clka,
     input wire ena,
     input wire [9:0] addra,
-    output reg [255:0] douta
+    output reg [127:0] douta
 );
-    reg [255:0] mem [0:678];
+    reg [127:0] mem [0:678];
     reg [9:0] addra_d;
     reg ena_d;
 

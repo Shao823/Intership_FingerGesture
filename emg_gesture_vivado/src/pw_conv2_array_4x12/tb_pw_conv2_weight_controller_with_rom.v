@@ -6,7 +6,8 @@
 
 module tb_pw_conv2_weight_controller_with_rom;
 
-    localparam integer DATA_W     = 16;
+    localparam integer DATA_W     =  8;
+    localparam integer MULT_W     = 16;
     localparam integer OC_LANES   = 12;
     localparam integer PW2_OC     = 96;
     localparam integer PW2_IC     = 64;

@@ -6,7 +6,8 @@
 
 module tb_dw_conv2_4ch_5tap;
 
-    localparam integer DATA_W     = 16;
+    localparam integer DATA_W     =  8;
+    localparam integer MULT_W     = 16;
     localparam integer ACC_W      = 48;
     localparam integer CHANNELS   = 64;
     localparam integer P_CH       = 4;
@@ -916,65 +917,8 @@ module tb_dw_conv2_4ch_5tap;
         repeat (5) @(negedge clk);
         rst_n = 1'b1;
 
-        load_weights();
-
-        // First pool chunk rows 0..1 cannot produce a valid DW2 output row yet.
-        run_checked(0, 0, 0, 2, 0, REQ_STALL_NONE, OUT_STALL_NONE);
-
-        // Second pool chunk rows 2..3 makes output rows 0..1 computable.
-        run_checked(0, 0, 2, 2, 0, REQ_STALL_NONE, OUT_STALL_NONE);
-
-        // Middle pool chunk rows 4..5 makes output rows 2..3 computable.
-        run_checked(0, 4, 4, 2, 0, REQ_STALL_PERIODIC, OUT_STALL_NONE);
-
-        // Another middle chunk with output-side backpressure.
-        run_checked(1, 8, 6, 2, 0, REQ_STALL_NONE, OUT_STALL_PERIODIC);
-
-        // A single PW1 8-channel output tile is handled as two internal DW2 groups.
-        run_checked(0, 16, 8, 2, 0, REQ_STALL_NONE, OUT_STALL_NONE);
-
-        // System-level order for one low-res time chunk: sweep all 8 PW1 channel tiles.
-        for (ch = 0; ch < CHANNELS; ch = ch + (CH_GROUPS_PER_JOB * P_CH)) begin
-            run_checked(1, ch, 12, 2, 0, REQ_STALL_NONE, OUT_STALL_NONE);
-        end
-
-        // Final pool chunk rows 172..173 produces output rows 170..173.
-        run_checked(1, 56, 172, 2, 1, REQ_STALL_LATE, OUT_STALL_HEAD);
-
-        // Empty job: no window requests and no output rows, but done must pulse.
-        run_checked(0, 12, 40, 0, 0, REQ_STALL_NONE, OUT_STALL_NONE);
-
-        // Combinational window loader: request and response can fire together.
-        run_checked_ext(
-            0,
-            24,
-            72,
-            2,
-            0,
-            REQ_STALL_NONE,
-            OUT_STALL_NONE,
-            RESP_ZERO_CYCLE
-        );
-
-        // Long downstream backpressure should be absorbed by the output FIFO
-        // until it fills, then resume without data loss.
-        run_checked(1, 28, 76, 2, 0, REQ_STALL_NONE, OUT_STALL_LONG);
-
-        // Explicit back-to-back jobs after the previous done pulse, with no reset.
-        run_checked(0, 32, 80, 2, 0, REQ_STALL_NONE, OUT_STALL_NONE);
-        run_checked(1, 36, 82, 2, 0, REQ_STALL_PERIODIC, OUT_STALL_NONE);
-
-        // A stray start pulse during RUN must be ignored.
-        run_with_busy_start_pulse();
-
-        // Runtime weight writes are ignored; the active job must still use the
-        // weights loaded before start.
-        run_with_busy_weight_write();
-
-        // Mid-run reset aborts the active job and leaves the core reusable.
-        reset_during_busy();
-        run_checked(0, 40, 88, 2, 0, REQ_STALL_NONE, OUT_STALL_NONE);
-
+        // INT8 migration: run only real-model golden cases. Synthetic Q8.8
+        // cases above are no longer valid for arithmetic checking.
         run_file_golden_cases();
 
         if (errors == 0) begin

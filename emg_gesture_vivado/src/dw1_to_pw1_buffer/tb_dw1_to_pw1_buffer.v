@@ -19,7 +19,8 @@ module `DW1_TO_PW1_TB_MODULE;
     parameter integer RUN_FULL_SCAN = 1;
 `endif
 
-    localparam integer DATA_W     = 16;
+    localparam integer DATA_W     =  8;
+    localparam integer MULT_W     = 16;
     localparam integer TIME_W     = 9;
     localparam integer INPUT_LEN  = 348;
     localparam integer PW1_IC     = 32;

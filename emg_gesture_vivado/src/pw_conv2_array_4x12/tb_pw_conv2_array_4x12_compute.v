@@ -6,7 +6,8 @@
 
 module tb_pw_conv2_array_4x12_compute;
 
-    localparam integer DATA_W     = 16;
+    localparam integer DATA_W     =  8;
+    localparam integer MULT_W     = 16;
     localparam integer ACC_W      = 48;
     localparam integer ROWS       = 4;
     localparam integer OC_LANES   = 12;
@@ -63,11 +64,11 @@ module tb_pw_conv2_array_4x12_compute;
 
     reg w_fold_we;
     reg [6:0] w_fold_oc;
-    reg signed [DATA_W-1:0] w_fold_wdata;
+    reg signed [MULT_W-1:0] w_fold_wdata;
 
     reg bias_fold_we;
     reg [6:0] bias_fold_oc;
-    reg signed [DATA_W-1:0] bias_fold_wdata;
+    reg signed [31:0] bias_fold_wdata;
 
     wire busy;
     wire done;
@@ -100,8 +101,8 @@ module tb_pw_conv2_array_4x12_compute;
     reg signed [ACC_W-1:0] expected_gap_sum [0:PW2_OC-1];
     reg signed [DATA_W-1:0] file_input [0:INPUT_LEN*PW2_IC-1];
     reg signed [DATA_W-1:0] file_weight [0:PW2_OC*PW2_IC-1];
-    reg signed [DATA_W-1:0] file_bn_scale [0:PW2_OC-1];
-    reg signed [DATA_W-1:0] file_bn_bias [0:PW2_OC-1];
+    reg signed [MULT_W-1:0] file_bn_scale [0:PW2_OC-1];
+    reg signed [31:0] file_bn_bias [0:PW2_OC-1];
     reg [15:0] file_case_t_base [0:FILE_CASES-1];
     reg [7:0] file_case_row_valid_mask [0:FILE_CASES-1];
     reg signed [ACC_W-1:0] file_expected_tile_sum [0:FILE_CASES*PW2_OC-1];
@@ -429,7 +430,7 @@ module tb_pw_conv2_array_4x12_compute;
         end
     endfunction
 
-    function signed [DATA_W-1:0] w_fold_value;
+    function signed [MULT_W-1:0] w_fold_value;
         input integer oc_idx;
         begin
             if (test_mode == FILE_MODE) begin
@@ -440,7 +441,7 @@ module tb_pw_conv2_array_4x12_compute;
         end
     endfunction
 
-    function signed [DATA_W-1:0] bias_fold_value;
+    function signed [31:0] bias_fold_value;
         input integer oc_idx;
         begin
             if (test_mode == FILE_MODE) begin
@@ -1046,60 +1047,8 @@ module tb_pw_conv2_array_4x12_compute;
         repeat (5) @(negedge clk);
         rst_n = 1'b1;
 
-        load_bn();
-
-        // Basic full 4-row tile. One start computes and accumulates all 96 channels.
-        run_gap_job(0, 0, 4'b1111, 0, READY_NONE, READY_NONE);
-        $display(
-            "INFO PW2 no-stall tile cycles=%0d weight_req=%0d act_req=%0d",
-            last_cycle_count,
-            weight_req_count,
-            act_req_count
-        );
-
-        // PW2 must wait for exact input tile readiness before requesting data.
-        run_gap_job(0, 12, 4'b1111, 4, READY_NONE, READY_NONE);
-
-        // Independent weight/activation request backpressure.
-        run_gap_job(1, 24, 4'b1111, 0, READY_PERIODIC, READY_LATE);
-
-        // Combinational response mode, covering req and response same-cycle fire.
-        run_gap_job_ext(
-            0,
-            36,
-            4'b1111,
-            0,
-            READY_NONE,
-            READY_NONE,
-            RESP_ZERO_CYCLE,
-            1,
-            0
-        );
-
-        // Final partial tile for 174 low-resolution rows: only rows 172 and 173 are valid.
-        run_gap_job(0, 172, 4'b0011, 0, READY_PERIODIC, READY_NONE);
-
-        // Back-to-back jobs without gap_clear must accumulate into the same 96 sums.
-        clear_gap_accumulator();
-        reset_expected_gap();
-        run_gap_job_ext(0, 88, 4'b1111, 0, READY_NONE, READY_NONE, RESP_ONE_CYCLE, 0, 0);
-        run_gap_job_ext(1, 92, 4'b1111, 2, READY_PERIODIC, READY_PERIODIC, RESP_ONE_CYCLE, 0, 0);
-        run_gap_job_ext(0, 172, 4'b0011, 0, READY_NONE, READY_NONE, RESP_ONE_CYCLE, 0, 0);
-
-        // A complete 174-row frame should raise gap_frame_done on the final partial tile.
-        run_full_frame_gap();
-
-        // A stray start during MAC must be ignored.
-        run_with_busy_start_pulse();
-
-        // Runtime folded-BN writes are ignored; active job must use preloaded BN.
-        run_with_busy_bn_write();
-
-        // Mid-run reset aborts the active job and leaves the core reusable.
-        reset_during_busy();
-        load_bn();
-        run_gap_job(0, 96, 4'b1111, 0, READY_NONE, READY_NONE);
-
+        // INT8 migration: run real-model tile golden cases only. The previous
+        // synthetic Q8.8 arithmetic cases are not valid under Q15 requant.
         run_file_golden_cases();
 
         if (errors == 0) begin

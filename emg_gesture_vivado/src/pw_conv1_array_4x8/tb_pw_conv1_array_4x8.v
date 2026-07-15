@@ -17,7 +17,8 @@ module tb_pw_conv1_array_4x8 #(
     // remain for tb_pw_conv1_array_4x8_compute. This wrapper TB intentionally
     // has no external weight stream.
 
-    localparam integer DATA_W     = 16;
+    localparam integer DATA_W     =  8;
+    localparam integer MULT_W     = 16;
     localparam integer ACC_W      = 48;
     localparam integer ROWS       = 4;
     localparam integer POOL_ROWS  = 2;
@@ -64,11 +65,11 @@ module tb_pw_conv1_array_4x8 #(
 
     reg w_fold_we;
     reg [5:0] w_fold_oc;
-    reg signed [DATA_W-1:0] w_fold_wdata;
+    reg signed [MULT_W-1:0] w_fold_wdata;
 
     reg bias_fold_we;
     reg [5:0] bias_fold_oc;
-    reg signed [DATA_W-1:0] bias_fold_wdata;
+    reg signed [31:0] bias_fold_wdata;
 
     reg out_ready;
     wire busy;
@@ -100,8 +101,8 @@ module tb_pw_conv1_array_4x8 #(
     reg signed [DATA_W-1:0] file_input [0:INPUT_LEN*PW1_IC-1];
     reg [15:0] file_top_case_t_base [0:TOP_CASES-1];
     reg signed [DATA_W-1:0] file_expected_top [0:TOP_CASES*POOL_ROWS*PW1_OC-1];
-    reg signed [DATA_W-1:0] expected_bn_scale [0:PW1_OC-1];
-    reg signed [DATA_W-1:0] expected_bn_bias [0:PW1_OC-1];
+    reg signed [MULT_W-1:0] expected_bn_scale [0:PW1_OC-1];
+    reg signed [31:0] expected_bn_bias [0:PW1_OC-1];
 
     wire input_tile_req_fire_tb;
     wire act_req_fire_tb;
@@ -606,18 +607,18 @@ module tb_pw_conv1_array_4x8 #(
                 $display("ERROR PW1 expected bn_bias.mem did not load");
                 errors = errors + 1;
             end
-            if (dut.u_compute.w_fold_mem[0] !== expected_bn_scale[0]) begin
+            if (dut.u_compute.multiplier_q15_mem[0] !== expected_bn_scale[0]) begin
                 $display(
                     "ERROR PW1 BN scale autoload mismatch got=%h expected=%h",
-                    dut.u_compute.w_fold_mem[0],
+                    dut.u_compute.multiplier_q15_mem[0],
                     expected_bn_scale[0]
                 );
                 errors = errors + 1;
             end
-            if (dut.u_compute.bias_fold_mem[0] !== expected_bn_bias[0]) begin
+            if (dut.u_compute.bias_int32_mem[0] !== expected_bn_bias[0]) begin
                 $display(
                     "ERROR PW1 BN bias autoload mismatch got=%h expected=%h",
-                    dut.u_compute.bias_fold_mem[0],
+                    dut.u_compute.bias_int32_mem[0],
                     expected_bn_bias[0]
                 );
                 errors = errors + 1;
@@ -813,11 +814,11 @@ module blk_mem_gen_pw_conv1_weight (
     input  wire clka,
     input  wire ena,
     input  wire [7:0] addra,
-    output reg  [127:0] douta
+    output reg  [63:0] douta
 );
     localparam integer READ_LATENCY = `PW1_MOCK_ROM_READ_LATENCY;
 
-    reg [127:0] mem [0:255];
+    reg [63:0] mem [0:255];
     reg [READ_LATENCY-1:0] en_pipe;
     reg [7:0] addr_pipe [0:READ_LATENCY-1];
 
@@ -825,10 +826,10 @@ module blk_mem_gen_pw_conv1_weight (
     integer pipe_i;
 
     initial begin
-        douta = 128'd0;
+        douta = 64'd0;
         en_pipe = {READ_LATENCY{1'b0}};
         for (init_i = 0; init_i < 256; init_i = init_i + 1) begin
-            mem[init_i] = {128{1'bx}};
+            mem[init_i] = {64{1'bx}};
         end
         for (pipe_i = 0; pipe_i < READ_LATENCY; pipe_i = pipe_i + 1) begin
             addr_pipe[pipe_i] = 8'd0;

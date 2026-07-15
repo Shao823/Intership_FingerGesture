@@ -16,7 +16,8 @@ module tb_stem_conv_array_4x4;
     // test. This test catches stale/mismatched ROM initialization through the
     // final tile comparison and the separate controller-with-ROM readback test.
 
-    localparam integer DATA_W       = 16;
+    localparam integer DATA_W       =  8;
+    localparam integer MULT_W     = 16;
     localparam integer ACC_W        = 48;
     localparam integer ROWS         = 4;
     localparam integer OC_LANES     = 4;
@@ -53,11 +54,11 @@ module tb_stem_conv_array_4x4;
 
     reg w_fold_we;
     reg [4:0] w_fold_oc;
-    reg signed [DATA_W-1:0] w_fold_wdata;
+    reg signed [MULT_W-1:0] w_fold_wdata;
 
     reg bias_fold_we;
     reg [4:0] bias_fold_oc;
-    reg signed [DATA_W-1:0] bias_fold_wdata;
+    reg signed [31:0] bias_fold_wdata;
 
     reg out_ready;
     wire busy;

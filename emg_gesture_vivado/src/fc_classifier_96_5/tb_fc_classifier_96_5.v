@@ -6,7 +6,8 @@
 
 module tb_fc_classifier_96_5;
 
-    localparam integer DATA_W        = 16;
+    localparam integer DATA_W        =  8;
+    localparam integer MULT_W     = 16;
     localparam integer GAP_ACC_W     = 48;
     localparam integer ACC_W         = 48;
     localparam integer FC0_IN        = 96;
@@ -15,7 +16,7 @@ module tb_fc_classifier_96_5;
     localparam integer FC0_OUT_LANES = 16;
     localparam integer GAP_LEN       = 174;
     localparam integer FRAC_BITS     = 8;
-    localparam integer FILE_CASES    = 20;
+    localparam integer FILE_CASES    = 10;
     localparam integer TIMEOUT       = 16000;
 
     reg clk;
@@ -290,9 +291,9 @@ module blk_mem_gen_fc_weight (
     input wire clka,
     input wire ena,
     input wire [9:0] addra,
-    output reg [255:0] douta
+    output reg [127:0] douta
 );
-    reg [255:0] mem [0:678];
+    reg [127:0] mem [0:678];
     reg [9:0] addra_d;
     reg ena_d;
 

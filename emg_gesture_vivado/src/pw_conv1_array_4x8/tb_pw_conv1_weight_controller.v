@@ -8,7 +8,8 @@ module tb_pw_conv1_weight_controller #(
     parameter integer BRAM_READ_LATENCY = 1
 );
 
-    localparam integer DATA_W     = 16;
+    localparam integer DATA_W     =  8;
+    localparam integer MULT_W     = 16;
     localparam integer OC_LANES   = 8;
     localparam integer PW1_OC     = 64;
     localparam integer PW1_IC     = 32;

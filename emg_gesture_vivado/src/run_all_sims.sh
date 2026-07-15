@@ -387,7 +387,7 @@ else
   echo "SKIP FC ROM IP simulations: generated FC weight IP simulation files not found"
 fi
 
-full_top_dir="${SCRIPT_DIR}/top/stem_dw1_pw1_dw2_pw2_pipeline"
+full_top_dir="${SCRIPT_DIR}/top/accelerator"
 full_top_case_limit="${FULL_TOP_RUN_CASE_LIMIT:-1}"
 full_top_real_case_limit="${FULL_TOP_RUN_REAL_CASE_LIMIT:-1}"
 

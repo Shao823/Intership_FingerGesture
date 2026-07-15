@@ -1,6 +1,9 @@
 
 /emg_gesture_repro/
 
+# Internal model artifacts (not published to remote).
+/lightcnn1d_int8_s001_internal/
+
 # Local tooling (e.g. iverilog source for local build) — not part of design.
 /tools/
 

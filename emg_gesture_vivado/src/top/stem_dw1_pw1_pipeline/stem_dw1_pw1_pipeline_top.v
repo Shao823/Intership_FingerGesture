@@ -13,7 +13,8 @@
 // required four DW1 rows are fully present.
 
 module stem_dw1_pw1_pipeline_top #(
-    parameter integer DATA_W     = 16,
+    parameter integer DATA_W     =  8,
+    parameter integer MULT_W     = 16,
     parameter integer ACC_W      = 48,
     parameter integer ROWS       = 4,
     parameter integer STEM_OC_LANES = 4,
@@ -60,10 +61,10 @@ module stem_dw1_pw1_pipeline_top #(
 
     input  wire stem_w_fold_we,
     input  wire [4:0] stem_w_fold_oc,
-    input  wire signed [DATA_W-1:0] stem_w_fold_wdata,
+    input  wire signed [MULT_W-1:0] stem_w_fold_wdata,
     input  wire stem_bias_fold_we,
     input  wire [4:0] stem_bias_fold_oc,
-    input  wire signed [DATA_W-1:0] stem_bias_fold_wdata,
+    input  wire signed [31:0] stem_bias_fold_wdata,
 
     input  wire dw1_weight_we,
     input  wire [4:0] dw1_weight_ch,
@@ -72,10 +73,10 @@ module stem_dw1_pw1_pipeline_top #(
 
     input  wire pw1_w_fold_we,
     input  wire [5:0] pw1_w_fold_oc,
-    input  wire signed [DATA_W-1:0] pw1_w_fold_wdata,
+    input  wire signed [MULT_W-1:0] pw1_w_fold_wdata,
     input  wire pw1_bias_fold_we,
     input  wire [5:0] pw1_bias_fold_oc,
-    input  wire signed [DATA_W-1:0] pw1_bias_fold_wdata,
+    input  wire signed [31:0] pw1_bias_fold_wdata,
 
     input  wire pw1_out_ready,
     output wire pw1_out_valid,

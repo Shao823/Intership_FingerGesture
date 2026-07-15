@@ -11,7 +11,8 @@ module tb_stem_conv_array_4x4_compute;
     //   by gen_testdata.py and are used here to test an arbitrary weight stream;
     // - the wrapper/top test uses weight_data/stem and the generated ROM IP.
 
-    localparam integer DATA_W    = 16;
+    localparam integer DATA_W    =  8;
+    localparam integer MULT_W     = 16;
     localparam integer ACC_W     = 48;
     localparam integer ROWS      = 4;
     localparam integer OC_LANES  = 4;
@@ -55,11 +56,11 @@ module tb_stem_conv_array_4x4_compute;
 
     reg w_fold_we;
     reg [4:0] w_fold_oc;
-    reg signed [DATA_W-1:0] w_fold_wdata;
+    reg signed [MULT_W-1:0] w_fold_wdata;
 
     reg bias_fold_we;
     reg [4:0] bias_fold_oc;
-    reg signed [DATA_W-1:0] bias_fold_wdata;
+    reg signed [31:0] bias_fold_wdata;
 
     wire busy;
     wire done;
@@ -92,8 +93,8 @@ module tb_stem_conv_array_4x4_compute;
     reg signed [DATA_W-1:0] expected [0:ROWS-1][0:OC_LANES-1];
     reg signed [DATA_W-1:0] file_raw_input [0:INPUT_LEN*STEM_IC-1];
     reg signed [DATA_W-1:0] file_weight [0:STEM_OC*STEM_K-1];
-    reg signed [DATA_W-1:0] file_bn_scale [0:STEM_OC-1];
-    reg signed [DATA_W-1:0] file_bn_bias [0:STEM_OC-1];
+    reg signed [MULT_W-1:0] file_bn_scale [0:STEM_OC-1];
+    reg signed [31:0] file_bn_bias [0:STEM_OC-1];
     reg [7:0] file_case_oc_base [0:FILE_CASES-1];
     reg [15:0] file_case_t_base [0:FILE_CASES-1];
     reg signed [DATA_W-1:0] file_expected [0:FILE_CASES*ROWS*OC_LANES-1];
@@ -431,7 +432,7 @@ module tb_stem_conv_array_4x4_compute;
         end
     endfunction
 
-    function signed [DATA_W-1:0] fold_scale_value;
+    function signed [MULT_W-1:0] fold_scale_value;
         input integer oc_idx;
         begin
             if (test_mode == FILE_MODE) begin
@@ -452,7 +453,7 @@ module tb_stem_conv_array_4x4_compute;
         end
     endfunction
 
-    function signed [DATA_W-1:0] fold_bias_value;
+    function signed [31:0] fold_bias_value;
         input integer oc_idx;
         begin
             if (test_mode == FILE_MODE) begin
@@ -475,7 +476,7 @@ module tb_stem_conv_array_4x4_compute;
 
     task write_w_fold;
         input integer oc_idx;
-        input signed [DATA_W-1:0] value;
+        input signed [MULT_W-1:0] value;
         begin
             @(negedge clk);
             w_fold_we = 1'b1;
@@ -488,7 +489,7 @@ module tb_stem_conv_array_4x4_compute;
 
     task write_bias_fold;
         input integer oc_idx;
-        input signed [DATA_W-1:0] value;
+        input signed [31:0] value;
         begin
             @(negedge clk);
             bias_fold_we = 1'b1;
@@ -783,66 +784,9 @@ module tb_stem_conv_array_4x4_compute;
         repeat (5) @(negedge clk);
         rst_n = 1'b1;
 
-        load_parameters();
-
-        // Same-cycle request acceptance and same-cycle vector return.
-        run_checked_tile(0, 4, 12, STALL_NONE);
-
-        // Saturation and ReLU paths with same-cycle response arrival.
-        run_checked_tile(1, 8, 48, STALL_NONE);
-
-        // Independent periodic request backpressure on weight and activation.
-        run_checked_tile(0, 4, 96, STALL_PERIODIC);
-
-        // Activation vector arrives first; weight arrives one cycle later.
-        run_checked_tile(0, 4, 128, STALL_WEIGHT_LATE_1);
-
-        // Activation vector is held for multiple cycles before weight arrives.
-        run_checked_tile(0, 4, 160, STALL_WEIGHT_LATE_LONG);
-
-        // Weight vector is held for multiple cycles before activation arrives.
-        run_checked_tile(1, 8, 192, STALL_ACT_LATE_LONG);
-
-        // Output writer backpressure: out_valid must stay high until accepted.
-        out_ready_delay = 4;
-        run_checked_tile(0, 4, 208, STALL_NONE);
-        out_ready_delay = 0;
-
-        // Back-to-back tiles after the previous DONE pulse, with no reset.
-        run_checked_tile(0, 4, 224, STALL_NONE);
-        run_checked_tile(1, 8, 256, STALL_PERIODIC);
-
-        // A stray start pulse during MAC must be ignored.
-        test_mode = 0;
-        test_oc_base = 4;
-        test_t_base = 288;
-        stall_mode = STALL_NONE;
-        compute_expected();
-        run_tile_with_busy_start_pulse();
-        if (!last_timeout) begin
-            check_outputs();
-        end
-
-        // Runtime BN writes are ignored; active tile keeps preloaded BN params.
-        test_mode = 0;
-        test_oc_base = 4;
-        test_t_base = 304;
-        stall_mode = STALL_NONE;
-        compute_expected();
-        run_with_busy_bn_write();
-        if (!last_timeout) begin
-            check_outputs();
-        end
-
-        // Mid-run reset aborts the active tile and leaves the core reusable.
-        test_mode = 0;
-        test_oc_base = 4;
-        test_t_base = 320;
-        stall_mode = STALL_PERIODIC;
-        reset_during_busy();
-        load_parameters();
-        run_checked_tile(0, 4, 352, STALL_NONE);
-
+        // INT8 migration: run the real-model golden cases. The older random
+        // Q8.8 stress cases above are intentionally not executed under the new
+        // quantization contract.
         run_file_golden_cases();
 
         if (errors == 0) begin

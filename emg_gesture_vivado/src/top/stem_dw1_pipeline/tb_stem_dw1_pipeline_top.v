@@ -9,7 +9,8 @@ module tb_stem_dw1_pipeline_top #(
     parameter integer WATERMARK_STRESS_ONLY = 0
 );
 
-    localparam integer DATA_W       = 16;
+    localparam integer DATA_W       =  8;
+    localparam integer MULT_W     = 16;
     localparam integer ACC_W        = 48;
     localparam integer ROWS         = 4;
     localparam integer OC_LANES     = 4;
@@ -52,10 +53,10 @@ module tb_stem_dw1_pipeline_top #(
 
     reg stem_w_fold_we;
     reg [4:0] stem_w_fold_oc;
-    reg signed [DATA_W-1:0] stem_w_fold_wdata;
+    reg signed [MULT_W-1:0] stem_w_fold_wdata;
     reg stem_bias_fold_we;
     reg [4:0] stem_bias_fold_oc;
-    reg signed [DATA_W-1:0] stem_bias_fold_wdata;
+    reg signed [31:0] stem_bias_fold_wdata;
 
     reg dw1_weight_we;
     reg [4:0] dw1_weight_ch;

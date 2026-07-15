@@ -6,7 +6,8 @@
 
 module tb_fc_weight_controller;
 
-    localparam integer DATA_W        = 16;
+    localparam integer DATA_W        =  8;
+    localparam integer MULT_W     = 16;
     localparam integer FC0_IN        = 96;
     localparam integer FC0_OUT       = 96;
     localparam integer FC1_OUT       = 5;
