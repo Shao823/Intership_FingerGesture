@@ -85,7 +85,7 @@ module accelerator #(
         DW2_PENDING_DEPTH;
     localparam [ROWS_W-1:0] ROWS_VALUE = ROWS;
     localparam [DW2_ROWS_W-1:0] POOL_ROWS_VALUE = POOL_ROWS;
-    localparam integer STEM_TO_DW1_SLICE_DEPTH = 4;
+    localparam integer STEM_TO_DW1_SLICE_DEPTH = 2;
     localparam [PENDING_CNT_W-1:0] DW1_PENDING_LAUNCH_LIMIT =
         PENDING_DEPTH - STEM_TO_DW1_SLICE_DEPTH;
     localparam integer STEM_OUT_SLICE_W = TIME_W + 5
@@ -117,9 +117,14 @@ module accelerator #(
     wire signed [ROWS*STEM_OC_LANES*DATA_W-1:0] stem_out_tile;
     wire stem_to_dw1_in_valid;
     wire stem_to_dw1_in_ready;
+    wire stem_to_dw1_slice_valid;
+    wire stem_to_dw1_slice_ready;
     wire stem_to_dw1_slice_busy;
     wire [STEM_OUT_SLICE_W-1:0] stem_to_dw1_slice_in;
     wire [STEM_OUT_SLICE_W-1:0] stem_to_dw1_slice_out;
+    wire [TIME_W-1:0] stem_to_dw1_slice_tile_t_base;
+    wire [4:0] stem_to_dw1_slice_tile_oc_base;
+    wire signed [ROWS*STEM_OC_LANES*DATA_W-1:0] stem_to_dw1_slice_tile;
     wire [TIME_W-1:0] stem_to_dw1_out_tile_t_base;
     wire [4:0] stem_to_dw1_out_tile_oc_base;
     wire signed [ROWS*STEM_OC_LANES*DATA_W-1:0] stem_to_dw1_out_tile;
@@ -146,9 +151,14 @@ module accelerator #(
     wire signed [STEM_OC_LANES*DATA_W-1:0] dw1_mid_out_vec;
     wire dw1_to_pw1_in_valid;
     wire dw1_to_pw1_in_ready;
+    wire dw1_to_pw1_slice_valid;
+    wire dw1_to_pw1_slice_ready;
     wire dw1_to_pw1_slice_busy;
     wire [DW1_OUT_SLICE_W-1:0] dw1_to_pw1_slice_in;
     wire [DW1_OUT_SLICE_W-1:0] dw1_to_pw1_slice_out;
+    wire [TIME_W-1:0] dw1_to_pw1_slice_t;
+    wire [4:0] dw1_to_pw1_slice_ch_base;
+    wire signed [STEM_OC_LANES*DATA_W-1:0] dw1_to_pw1_slice_vec;
     wire [TIME_W-1:0] dw1_to_pw1_out_t;
     wire [4:0] dw1_to_pw1_out_ch_base;
     wire signed [STEM_OC_LANES*DATA_W-1:0] dw1_to_pw1_out_vec;
@@ -176,10 +186,15 @@ module accelerator #(
     wire pw1_to_dw2_in_valid;
     wire pw1_to_dw2_in_ready;
     wire pw1_to_dw2_slice_valid;
+    wire pw1_to_dw2_slice_raw_valid;
+    wire pw1_to_dw2_slice_ready;
     wire pw1_to_dw2_out_ready;
     wire pw1_to_dw2_slice_busy;
     wire [PW1_OUT_SLICE_W-1:0] pw1_to_dw2_slice_in;
     wire [PW1_OUT_SLICE_W-1:0] pw1_to_dw2_slice_out;
+    wire [LOW_TIME_W-1:0] pw1_to_dw2_slice_pool_t_base;
+    wire [5:0] pw1_to_dw2_slice_oc_base;
+    wire signed [POOL_ROWS*PW1_OC_LANES*DATA_W-1:0] pw1_to_dw2_slice_tile;
     wire [LOW_TIME_W-1:0] pw1_to_dw2_pool_t_base;
     wire [5:0] pw1_to_dw2_oc_base;
     wire signed [POOL_ROWS*PW1_OC_LANES*DATA_W-1:0] pw1_to_dw2_tile;
@@ -205,9 +220,14 @@ module accelerator #(
     wire signed [CH_LANES*DATA_W-1:0] dw2_mid_out_vec;
     wire dw2_to_pw2_in_valid;
     wire dw2_to_pw2_in_ready;
+    wire dw2_to_pw2_slice_valid;
+    wire dw2_to_pw2_slice_ready;
     wire dw2_to_pw2_slice_busy;
     wire [DW2_OUT_SLICE_W-1:0] dw2_to_pw2_slice_in;
     wire [DW2_OUT_SLICE_W-1:0] dw2_to_pw2_slice_out;
+    wire [LOW_TIME_W-1:0] dw2_to_pw2_slice_t;
+    wire [5:0] dw2_to_pw2_slice_ch_base;
+    wire signed [CH_LANES*DATA_W-1:0] dw2_to_pw2_slice_vec;
     wire [LOW_TIME_W-1:0] dw2_to_pw2_out_t;
     wire [5:0] dw2_to_pw2_out_ch_base;
     wire signed [CH_LANES*DATA_W-1:0] dw2_to_pw2_out_vec;
@@ -277,6 +297,8 @@ module accelerator #(
     wire pw1_start_now;
     wire dw2_start_now;
     wire pw2_start_now;
+    wire pw1_issue_in_range;
+    wire pw2_issue_in_range;
     wire dw1_pending_push;
     wire dw1_pending_pop;
     wire dw2_pending_push;
@@ -286,7 +308,6 @@ module accelerator #(
     wire [DW2_PENDING_CNT_W-1:0] dw2_pending_count_after_pop;
     wire [DW2_PENDING_CNT_W-1:0] dw2_pending_count_next;
     wire pw1_out_fire;
-
     assign class_valid = fc_result_valid;
     assign class_idx = fc_class_idx;
 
@@ -304,6 +325,10 @@ module accelerator #(
     assign dw2_pending_room = (dw2_pending_count_after_pop
         < DW2_PENDING_DEPTH_COUNT);
 
+    assign pw1_issue_in_range = (next_pw1_tile_t_base <= (INPUT_LEN - ROWS));
+    assign pw2_issue_in_range =
+        (next_pw2_tile_t_base <= PW2_FINAL_TILE_T_BASE_VALUE);
+
     assign stem_issue_now = schedule_active
         && !buffer_clear
         && !all_stem_issued
@@ -318,7 +343,7 @@ module accelerator #(
 
     assign pw1_start_now = schedule_active
         && !buffer_clear
-        && !all_pw1_issued
+        && pw1_issue_in_range
         && !pw1_busy
         && !pw1_start;
 
@@ -330,7 +355,7 @@ module accelerator #(
     assign pw2_start_now = schedule_active
         && !buffer_clear
         && !pw2_gap_clear
-        && !all_pw2_issued
+        && pw2_issue_in_range
         && !pw2_busy
         && !pw2_start;
 
@@ -340,10 +365,15 @@ module accelerator #(
         stem_out_tile
     };
     assign {
-        stem_to_dw1_out_tile_t_base,
-        stem_to_dw1_out_tile_oc_base,
-        stem_to_dw1_out_tile
+        stem_to_dw1_slice_tile_t_base,
+        stem_to_dw1_slice_tile_oc_base,
+        stem_to_dw1_slice_tile
     } = stem_to_dw1_slice_out;
+    assign stem_to_dw1_slice_ready = stem_to_dw1_in_ready;
+    assign stem_to_dw1_in_valid = stem_to_dw1_slice_valid;
+    assign stem_to_dw1_out_tile_t_base = stem_to_dw1_slice_tile_t_base;
+    assign stem_to_dw1_out_tile_oc_base = stem_to_dw1_slice_tile_oc_base;
+    assign stem_to_dw1_out_tile = stem_to_dw1_slice_tile;
 
     assign dw1_pending_push = busy
         && stem_to_dw1_in_valid
@@ -359,10 +389,15 @@ module accelerator #(
         dw1_mid_out_vec
     };
     assign {
-        dw1_to_pw1_out_t,
-        dw1_to_pw1_out_ch_base,
-        dw1_to_pw1_out_vec
+        dw1_to_pw1_slice_t,
+        dw1_to_pw1_slice_ch_base,
+        dw1_to_pw1_slice_vec
     } = dw1_to_pw1_slice_out;
+    assign dw1_to_pw1_slice_ready = dw1_to_pw1_in_ready;
+    assign dw1_to_pw1_in_valid = dw1_to_pw1_slice_valid;
+    assign dw1_to_pw1_out_t = dw1_to_pw1_slice_t;
+    assign dw1_to_pw1_out_ch_base = dw1_to_pw1_slice_ch_base;
+    assign dw1_to_pw1_out_vec = dw1_to_pw1_slice_vec;
 
     assign pw1_to_dw2_slice_in = {
         pw1_out_pool_t_base[LOW_TIME_W-1:0],
@@ -370,10 +405,15 @@ module accelerator #(
         pw1_out_tile
     };
     assign {
-        pw1_to_dw2_pool_t_base,
-        pw1_to_dw2_oc_base,
-        pw1_to_dw2_tile
+        pw1_to_dw2_slice_pool_t_base,
+        pw1_to_dw2_slice_oc_base,
+        pw1_to_dw2_slice_tile
     } = pw1_to_dw2_slice_out;
+    assign pw1_to_dw2_slice_ready = pw1_to_dw2_out_ready;
+    assign pw1_to_dw2_slice_valid = pw1_to_dw2_slice_raw_valid;
+    assign pw1_to_dw2_pool_t_base = pw1_to_dw2_slice_pool_t_base;
+    assign pw1_to_dw2_oc_base = pw1_to_dw2_slice_oc_base;
+    assign pw1_to_dw2_tile = pw1_to_dw2_slice_tile;
     assign pw1_to_dw2_in_valid = pw1_to_dw2_slice_valid && dw2_pending_room;
     assign pw1_to_dw2_out_ready = pw1_to_dw2_in_ready && dw2_pending_room;
     assign pw1_out_fire = pw1_out_valid && pw1_out_ready;
@@ -385,10 +425,15 @@ module accelerator #(
         dw2_mid_out_vec
     };
     assign {
-        dw2_to_pw2_out_t,
-        dw2_to_pw2_out_ch_base,
-        dw2_to_pw2_out_vec
+        dw2_to_pw2_slice_t,
+        dw2_to_pw2_slice_ch_base,
+        dw2_to_pw2_slice_vec
     } = dw2_to_pw2_slice_out;
+    assign dw2_to_pw2_slice_ready = dw2_to_pw2_in_ready;
+    assign dw2_to_pw2_in_valid = dw2_to_pw2_slice_valid;
+    assign dw2_to_pw2_out_t = dw2_to_pw2_slice_t;
+    assign dw2_to_pw2_out_ch_base = dw2_to_pw2_slice_ch_base;
+    assign dw2_to_pw2_out_vec = dw2_to_pw2_slice_vec;
 
     assign dw2_pending_pop = dw2_start_now;
     assign dw2_pending_count_next = dw2_pending_count
@@ -501,8 +546,8 @@ module accelerator #(
         .in_valid(stem_out_valid),
         .in_ready(stem_to_buffer_ready),
         .in_data(stem_to_dw1_slice_in),
-        .out_valid(stem_to_dw1_in_valid),
-        .out_ready(stem_to_dw1_in_ready),
+        .out_valid(stem_to_dw1_slice_valid),
+        .out_ready(stem_to_dw1_slice_ready),
         .out_data(stem_to_dw1_slice_out),
         .busy(stem_to_dw1_slice_busy)
     );
@@ -584,7 +629,7 @@ module accelerator #(
 
     emg_stream_fifo_slice #(
         .DATA_W(DW1_OUT_SLICE_W),
-        .DEPTH(4)
+        .DEPTH(2)
     ) u_dw1_to_pw1_ready_slice (
         .clk(clk),
         .rst_n(rst_n),
@@ -592,8 +637,8 @@ module accelerator #(
         .in_valid(dw1_mid_out_valid),
         .in_ready(dw1_mid_out_ready),
         .in_data(dw1_to_pw1_slice_in),
-        .out_valid(dw1_to_pw1_in_valid),
-        .out_ready(dw1_to_pw1_in_ready),
+        .out_valid(dw1_to_pw1_slice_valid),
+        .out_ready(dw1_to_pw1_slice_ready),
         .out_data(dw1_to_pw1_slice_out),
         .busy(dw1_to_pw1_slice_busy)
     );
@@ -679,7 +724,7 @@ module accelerator #(
 
     emg_stream_fifo_slice #(
         .DATA_W(PW1_OUT_SLICE_W),
-        .DEPTH(4)
+        .DEPTH(2)
     ) u_pw1_to_dw2_ready_slice (
         .clk(clk),
         .rst_n(rst_n),
@@ -687,8 +732,8 @@ module accelerator #(
         .in_valid(pw1_out_valid),
         .in_ready(pw1_out_ready),
         .in_data(pw1_to_dw2_slice_in),
-        .out_valid(pw1_to_dw2_slice_valid),
-        .out_ready(pw1_to_dw2_out_ready),
+        .out_valid(pw1_to_dw2_slice_raw_valid),
+        .out_ready(pw1_to_dw2_slice_ready),
         .out_data(pw1_to_dw2_slice_out),
         .busy(pw1_to_dw2_slice_busy)
     );
@@ -772,7 +817,7 @@ module accelerator #(
 
     emg_stream_fifo_slice #(
         .DATA_W(DW2_OUT_SLICE_W),
-        .DEPTH(4)
+        .DEPTH(2)
     ) u_dw2_to_pw2_ready_slice (
         .clk(clk),
         .rst_n(rst_n),
@@ -780,8 +825,8 @@ module accelerator #(
         .in_valid(dw2_mid_out_valid),
         .in_ready(dw2_mid_out_ready),
         .in_data(dw2_to_pw2_slice_in),
-        .out_valid(dw2_to_pw2_in_valid),
-        .out_ready(dw2_to_pw2_in_ready),
+        .out_valid(dw2_to_pw2_slice_valid),
+        .out_ready(dw2_to_pw2_slice_ready),
         .out_data(dw2_to_pw2_slice_out),
         .busy(dw2_to_pw2_slice_busy)
     );
@@ -1030,6 +1075,7 @@ module accelerator #(
                     pw1_tile_t_base <= next_pw1_tile_t_base;
                     if (next_pw1_tile_t_base == (INPUT_LEN - ROWS)) begin
                         all_pw1_issued <= 1'b1;
+                        next_pw1_tile_t_base <= next_pw1_tile_t_base + ROWS;
                     end else begin
                         next_pw1_tile_t_base <= next_pw1_tile_t_base + ROWS;
                     end
@@ -1066,6 +1112,7 @@ module accelerator #(
                         <= calc_pw2_row_valid_mask(next_pw2_tile_t_base);
                     if (next_pw2_tile_t_base == PW2_FINAL_TILE_T_BASE_VALUE) begin
                         all_pw2_issued <= 1'b1;
+                        next_pw2_tile_t_base <= next_pw2_tile_t_base + ROWS;
                     end else begin
                         next_pw2_tile_t_base <= next_pw2_tile_t_base + ROWS;
                     end

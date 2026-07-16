@@ -1,13 +1,13 @@
 // Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
 // --------------------------------------------------------------------------------
 // Tool Version: Vivado v.2022.2 (win64) Build 3671981 Fri Oct 14 05:00:03 MDT 2022
-// Date        : Tue Jul 14 13:03:11 2026
+// Date        : Thu Jul 16 14:25:11 2026
 // Host        : ShaoQingyu running 64-bit major release  (build 9200)
 // Command     : write_verilog -force -mode synth_stub
 //               d:/Intership/emg_gesture_vivado.gen/sources_1/ip/blk_mem_gen_pw_conv2_weight/blk_mem_gen_pw_conv2_weight_stub.v
 // Design      : blk_mem_gen_pw_conv2_weight
 // Purpose     : Stub declaration of top-level module interface
-// Device      : xc7k70tfbv676-1
+// Device      : xczu7ev-ffvc1156-1-i
 // --------------------------------------------------------------------------------
 
 // This empty module with port declaration file causes synthesis tools to infer a black box for IP.
@@ -15,9 +15,9 @@
 // Please paste the declaration into a Verilog source file or add the file as an additional source.
 (* x_core_info = "blk_mem_gen_v8_4_5,Vivado 2022.2" *)
 module blk_mem_gen_pw_conv2_weight(clka, ena, addra, douta)
-/* synthesis syn_black_box black_box_pad_pin="clka,ena,addra[8:0],douta[191:0]" */;
+/* synthesis syn_black_box black_box_pad_pin="clka,ena,addra[8:0],douta[95:0]" */;
   input clka;
   input ena;
   input [8:0]addra;
-  output [191:0]douta;
+  output [95:0]douta;
 endmodule

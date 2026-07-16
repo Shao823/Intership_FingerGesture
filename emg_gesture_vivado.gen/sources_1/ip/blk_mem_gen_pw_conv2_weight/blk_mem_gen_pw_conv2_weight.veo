@@ -58,7 +58,7 @@ blk_mem_gen_pw_conv2_weight your_instance_name (
   .clka(clka),    // input wire clka
   .ena(ena),      // input wire ena
   .addra(addra),  // input wire [8 : 0] addra
-  .douta(douta)  // output wire [191 : 0] douta
+  .douta(douta)  // output wire [95 : 0] douta
 );
 // INST_TAG_END ------ End INSTANTIATION Template ---------
 

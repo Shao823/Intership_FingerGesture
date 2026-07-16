@@ -56,7 +56,7 @@ COMPONENT blk_mem_gen_pw_conv2_weight
     clka : IN STD_LOGIC;
     ena : IN STD_LOGIC;
     addra : IN STD_LOGIC_VECTOR(8 DOWNTO 0);
-    douta : OUT STD_LOGIC_VECTOR(191 DOWNTO 0) 
+    douta : OUT STD_LOGIC_VECTOR(95 DOWNTO 0) 
   );
 END COMPONENT;
 -- COMP_TAG_END ------ End COMPONENT Declaration ------------

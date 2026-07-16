@@ -63,6 +63,196 @@ def write_coe(path: Path, words: list[str]) -> None:
     )
 
 
+def file_spec(path: str, role: str, shape: list[int], bits: int, layout: str) -> dict:
+    return {
+        "path": path,
+        "role": role,
+        "shape": shape,
+        "element_width_bits": bits,
+        "layout": layout,
+    }
+
+
+def packed_file_spec(
+    path: str,
+    role: str,
+    shape: list[int],
+    lanes_per_word: int,
+    lane_width_bits: int,
+    layout: str,
+) -> dict:
+    return {
+        "path": path,
+        "role": role,
+        "shape": shape,
+        "lanes_per_word": lanes_per_word,
+        "lane_width_bits": lane_width_bits,
+        "word_width_bits": lanes_per_word * lane_width_bits,
+        "layout": layout,
+    }
+
+
+def write_weight_manifest(model_manifest: dict, golden_case_count: int) -> None:
+    index_to_label = model_manifest.get("index_to_label", {})
+    class_labels = [
+        index_to_label.get(str(idx), idx)
+        for idx in range(FC_CLASSES)
+    ]
+
+    manifest = {
+        "format_version": 2,
+        "generated_by": "emg_gesture_vivado/src/gen_int8_assets.py",
+        "source": {
+            "package": str(PKG_ROOT.relative_to(PROJECT_ROOT)),
+            "integer_parameters": str(PARAM_PATH.relative_to(PROJECT_ROOT)),
+            "model_manifest": str(MANIFEST_PATH.relative_to(PROJECT_ROOT)),
+            "golden_vectors": str(GOLDEN_ROOT.relative_to(PROJECT_ROOT)),
+            "checkpoint_sha256": model_manifest.get("checkpoint_sha256"),
+            "golden_case_count": golden_case_count,
+        },
+        "model": {
+            "architecture": model_manifest.get("architecture", "LightCNN1D"),
+            "input_shape": model_manifest.get("input_shape", [1, STEM_IC, INPUT_LEN]),
+            "layout": model_manifest.get("layout", "NCT"),
+            "class_labels": class_labels,
+        },
+        "quantization": {
+            "weights": "signed INT8, two's complement",
+            "activations": "signed INT8, symmetric zero-point 0; valid runtime range [-127, 127]",
+            "bias": "signed INT32, already expressed in the accumulator domain",
+            "requant_multiplier": "signed Q15 multiplier stored as int16",
+            "right_shift": "unsigned shift count stored as hex; RTL reads low 8 bits",
+            "requant_formula": (
+                "acc_bias = sum(int8 * int8) + bias_int32; "
+                "product = acc_bias * multiplier_q15; "
+                "q = round_half_away_from_zero(product >> right_shift); "
+                "out = saturate_int8(q)"
+            ),
+            "packed_word_layout": "word[lane*8 +: 8] = lane_value; lane 0 is the rightmost byte in the hex line",
+        },
+        "compatibility_aliases": {
+            "stem/bn_scale.mem": "stem/multiplier_q15.mem",
+            "stem/bn_bias.mem": "stem/bias_int32.mem",
+            "pw1/bn_scale.mem": "pw1/multiplier_q15.mem",
+            "pw1/bn_bias.mem": "pw1/bias_int32.mem",
+            "pw2/bn_scale.mem": "pw2/multiplier_q15.mem",
+            "pw2/bn_bias.mem": "pw2/bias_int32.mem",
+        },
+        "modules": {
+            "stem": {
+                "rtl": "emg_gesture_vivado/src/stem_conv_array_4x4",
+                "files": {
+                    "weight_packed": packed_file_spec(
+                        "stem/weight_packed.mem",
+                        "stem conv weights",
+                        [STEM_OC // 4, STEM_K_FLAT],
+                        4,
+                        DATA_W,
+                        "address = (oc_base/4) * 35 + k_flat; lane i = out channel oc_base+i",
+                    ),
+                    "weight_packed_coe": file_spec(
+                        "stem/weight_packed.coe",
+                        "Vivado BRAM init for weight_packed",
+                        [STEM_OC // 4, STEM_K_FLAT],
+                        4 * DATA_W,
+                        "COE wrapper around stem/weight_packed.mem",
+                    ),
+                    "bias_int32": file_spec("stem/bias_int32.mem", "post-conv bias", [STEM_OC], 32, "one value per output channel"),
+                    "multiplier_q15": file_spec("stem/multiplier_q15.mem", "post-conv Q15 multiplier", [STEM_OC], 16, "one value per output channel"),
+                    "right_shift": file_spec("stem/right_shift.mem", "post-conv right shift", [STEM_OC], 16, "one value per output channel; low 8 bits used"),
+                    "bn_scale_compat": file_spec("stem/bn_scale.mem", "compat alias for multiplier_q15", [STEM_OC], 16, "identical to stem/multiplier_q15.mem"),
+                    "bn_bias_compat": file_spec("stem/bn_bias.mem", "compat alias for bias_int32", [STEM_OC], 32, "identical to stem/bias_int32.mem"),
+                },
+            },
+            "dw1": {
+                "rtl": "emg_gesture_vivado/src/dw_conv1_4ch_5tap",
+                "files": {
+                    "weight": file_spec("dw1/weight.mem", "depthwise weights", [STEM_OC, DW_K], DATA_W, "row-major: channel outer, tap inner"),
+                    "bias_int32": file_spec("dw1/bias_int32.mem", "depthwise bias", [STEM_OC], 32, "one value per channel"),
+                    "multiplier_q15": file_spec("dw1/multiplier_q15.mem", "depthwise Q15 multiplier", [STEM_OC], 16, "one value per channel"),
+                    "right_shift": file_spec("dw1/right_shift.mem", "depthwise right shift", [STEM_OC], 16, "one value per channel; low 8 bits used"),
+                },
+            },
+            "pw1": {
+                "rtl": "emg_gesture_vivado/src/pw_conv1_array_4x8",
+                "files": {
+                    "weight_packed": packed_file_spec(
+                        "pw1/weight_packed.mem",
+                        "pointwise weights for BRAM",
+                        [PW1_OC // 8, STEM_OC],
+                        8,
+                        DATA_W,
+                        "address = (oc_base/8) * 32 + input channel; lane i = out channel oc_base+i",
+                    ),
+                    "weight_packed_coe": file_spec("pw1/weight_packed.coe", "Vivado BRAM init for weight_packed", [PW1_OC // 8, STEM_OC], 8 * DATA_W, "COE wrapper around pw1/weight_packed.mem"),
+                    "weight": file_spec("pw1/weight.mem", "unpacked pointwise weights for tests", [PW1_OC, STEM_OC], DATA_W, "row-major: output channel outer, input channel inner"),
+                    "bias_int32": file_spec("pw1/bias_int32.mem", "pointwise bias", [PW1_OC], 32, "one value per output channel"),
+                    "multiplier_q15": file_spec("pw1/multiplier_q15.mem", "pointwise Q15 multiplier", [PW1_OC], 16, "one value per output channel"),
+                    "right_shift": file_spec("pw1/right_shift.mem", "pointwise right shift", [PW1_OC], 16, "one value per output channel; low 8 bits used"),
+                    "bn_scale_compat": file_spec("pw1/bn_scale.mem", "compat alias for multiplier_q15", [PW1_OC], 16, "identical to pw1/multiplier_q15.mem"),
+                    "bn_bias_compat": file_spec("pw1/bn_bias.mem", "compat alias for bias_int32", [PW1_OC], 32, "identical to pw1/bias_int32.mem"),
+                },
+            },
+            "dw2": {
+                "rtl": "emg_gesture_vivado/src/dw_conv2_4ch_5tap",
+                "files": {
+                    "weight": file_spec("dw2/weight.mem", "depthwise weights", [PW1_OC, DW_K], DATA_W, "row-major: channel outer, tap inner"),
+                    "bias_int32": file_spec("dw2/bias_int32.mem", "depthwise bias", [PW1_OC], 32, "one value per channel"),
+                    "multiplier_q15": file_spec("dw2/multiplier_q15.mem", "depthwise Q15 multiplier", [PW1_OC], 16, "one value per channel"),
+                    "right_shift": file_spec("dw2/right_shift.mem", "depthwise right shift", [PW1_OC], 16, "one value per channel; low 8 bits used"),
+                },
+            },
+            "pw2": {
+                "rtl": "emg_gesture_vivado/src/pw_conv2_array_4x12",
+                "files": {
+                    "weight_packed": packed_file_spec(
+                        "pw2/weight_packed.mem",
+                        "pointwise weights for BRAM",
+                        [PW2_OC // 12, PW1_OC],
+                        12,
+                        DATA_W,
+                        "address = (oc_base/12) * 64 + input channel; lane i = out channel oc_base+i",
+                    ),
+                    "weight_packed_coe": file_spec("pw2/weight_packed.coe", "Vivado BRAM init for weight_packed", [PW2_OC // 12, PW1_OC], 12 * DATA_W, "COE wrapper around pw2/weight_packed.mem"),
+                    "weight": file_spec("pw2/weight.mem", "unpacked pointwise weights for tests", [PW2_OC, PW1_OC], DATA_W, "row-major: output channel outer, input channel inner"),
+                    "bias_int32": file_spec("pw2/bias_int32.mem", "pointwise bias", [PW2_OC], 32, "one value per output channel"),
+                    "multiplier_q15": file_spec("pw2/multiplier_q15.mem", "pointwise Q15 multiplier", [PW2_OC], 16, "one value per output channel"),
+                    "right_shift": file_spec("pw2/right_shift.mem", "pointwise right shift", [PW2_OC], 16, "one value per output channel; low 8 bits used"),
+                    "bn_scale_compat": file_spec("pw2/bn_scale.mem", "compat alias for multiplier_q15", [PW2_OC], 16, "identical to pw2/multiplier_q15.mem"),
+                    "bn_bias_compat": file_spec("pw2/bn_bias.mem", "compat alias for bias_int32", [PW2_OC], 32, "identical to pw2/bias_int32.mem"),
+                },
+            },
+            "gap": {
+                "rtl": "emg_gesture_vivado/src/fc_classifier_96_5",
+                "files": {
+                    "multiplier_q15": file_spec("gap/multiplier_q15.mem", "GAP sum to embedding input Q15 multiplier", [1], 16, "single scalar"),
+                    "right_shift": file_spec("gap/right_shift.mem", "GAP sum to embedding input right shift", [1], 16, "single scalar; low 8 bits used"),
+                },
+            },
+            "fc": {
+                "rtl": "emg_gesture_vivado/src/fc_classifier_96_5",
+                "files": {
+                    "weight_packed": packed_file_spec("fc/weight_packed_256.mem", "FC0/FC1 packed INT8 weight ROM; filename kept for existing IP", [7, PW2_OC + 1], 16, DATA_W, "FC0 groups first, then FC1; k=96 is reserved zero padding, bias is separate"),
+                    "weight_packed_coe": file_spec("fc/weight_packed_256.coe", "Vivado BRAM init for FC packed weight ROM", [7, PW2_OC + 1], 16 * DATA_W, "COE wrapper around fc/weight_packed_256.mem"),
+                    "fc0_weight": file_spec("fc0/weight.mem", "unpacked FC0 INT8 weights plus reserved k=96 zero slot", [PW2_OC, PW2_OC + 1], DATA_W, "row-major: output channel outer, k inner"),
+                    "fc0_bias_int32": file_spec("fc0/bias_int32.mem", "FC0 bias", [PW2_OC], 32, "one value per output channel"),
+                    "fc0_multiplier_q15": file_spec("fc0/multiplier_q15.mem", "FC0 Q15 multiplier", [PW2_OC], 16, "one value per output channel"),
+                    "fc0_right_shift": file_spec("fc0/right_shift.mem", "FC0 right shift", [PW2_OC], 16, "one value per output channel; low 8 bits used"),
+                    "fc1_weight": file_spec("fc1/weight.mem", "unpacked FC1 INT8 weights plus reserved k=96 zero slot", [FC_CLASSES, PW2_OC + 1], DATA_W, "row-major: class outer, k inner"),
+                    "fc1_bias_int32": file_spec("fc1/bias_int32.mem", "FC1 bias", [FC_CLASSES], 32, "one value per class"),
+                    "fc1_multiplier_q15": file_spec("fc1/multiplier_q15.mem", "FC1 Q15 multiplier", [FC_CLASSES], 16, "one value per class"),
+                    "fc1_right_shift": file_spec("fc1/right_shift.mem", "FC1 right shift", [FC_CLASSES], 16, "one value per class; low 8 bits used"),
+                },
+            },
+        },
+    }
+
+    (WEIGHT_ROOT / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
 def quantize_multiplier(real_multiplier: float) -> tuple[int, int]:
     significand, exponent = np.frexp(np.asarray([real_multiplier], dtype=np.float64))
     multiplier = np.rint(significand * (1 << 15)).astype(np.int64)
@@ -324,6 +514,7 @@ def main() -> None:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     samples = load_traces()
     export_weights_and_quant_params(params, manifest)
+    write_weight_manifest(manifest, len(samples))
     write_top_testdata(samples)
     write_module_testdata(samples[0], params)
     print(f"generated INT8 assets for {len(samples)} golden cases")

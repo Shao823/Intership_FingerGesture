@@ -103,7 +103,7 @@ module stem_dw1_pipeline_top #(
     localparam integer OC_BASE_W = 5;
     localparam [PENDING_CNT_W-1:0] PENDING_DEPTH_COUNT = PENDING_DEPTH;
     localparam [ROWS_W-1:0] ROWS_VALUE = ROWS;
-    localparam integer STEM_TO_DW1_SLICE_DEPTH = 4;
+    localparam integer STEM_TO_DW1_SLICE_DEPTH = 2;
     localparam [PENDING_CNT_W-1:0] PENDING_LAUNCH_LIMIT =
         PENDING_DEPTH - STEM_TO_DW1_SLICE_DEPTH;
     localparam integer STEM_OUT_SLICE_W = TIME_W + 5
