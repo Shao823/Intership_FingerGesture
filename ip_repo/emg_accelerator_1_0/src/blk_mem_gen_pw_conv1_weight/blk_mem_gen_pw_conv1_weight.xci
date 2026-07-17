@@ -4,7 +4,7 @@
     "xci_name": "blk_mem_gen_pw_conv1_weight",
     "component_reference": "xilinx.com:ip:blk_mem_gen:8.4",
     "ip_revision": "5",
-    "gen_directory": "../../../../emg_gesture_vivado.gen/sources_1/ip/blk_mem_gen_pw_conv1_weight",
+    "gen_directory": "../../../../../intership/emg_gesture_vivado/emg_gesture_vivado.tmp/emg_accelerator_v1_0_project/emg_accelerator_v1_0_project.gen/sources_1/ip/blk_mem_gen_pw_conv1_weight",
     "parameters": {
       "component_parameters": {
         "Component_Name": [ { "value": "blk_mem_gen_pw_conv1_weight", "resolve_type": "user", "usage": "all" } ],
@@ -51,7 +51,7 @@
         "register_portb_output_of_softecc": [ { "value": "false", "resolve_type": "user", "format": "bool", "enabled": false, "usage": "all" } ],
         "Pipeline_Stages": [ { "value": "0", "resolve_type": "user", "enabled": false, "usage": "all" } ],
         "Load_Init_File": [ { "value": "true", "value_src": "user", "resolve_type": "user", "format": "bool", "usage": "all" } ],
-        "Coe_File": [ { "value": "../../../weight_data/pw1/weight_packed.coe", "value_src": "user", "resolve_type": "user", "usage": "all" } ],
+        "Coe_File": [ { "value": "../weight_data/pw1/pw1_weight_packed.coe", "value_src": "user", "resolve_type": "user", "usage": "all" } ],
         "Fill_Remaining_Memory_Locations": [ { "value": "false", "resolve_type": "user", "format": "bool", "usage": "all" } ],
         "Remaining_Memory_Locations": [ { "value": "0", "resolve_type": "user", "enabled": false, "usage": "all" } ],
         "Use_RSTA_Pin": [ { "value": "false", "resolve_type": "user", "format": "bool", "usage": "all" } ],
@@ -176,11 +176,11 @@
         "IPCONTEXT": [ { "value": "IP_Flow" } ],
         "IPREVISION": [ { "value": "5" } ],
         "MANAGED": [ { "value": "TRUE" } ],
-        "OUTPUTDIR": [ { "value": "../../../../emg_gesture_vivado.gen/sources_1/ip/blk_mem_gen_pw_conv1_weight" } ],
+        "OUTPUTDIR": [ { "value": "../../../../../intership/emg_gesture_vivado/emg_gesture_vivado.tmp/emg_accelerator_v1_0_project/emg_accelerator_v1_0_project.gen/sources_1/ip/blk_mem_gen_pw_conv1_weight" } ],
         "SELECTEDSIMMODEL": [ { "value": "" } ],
         "SHAREDDIR": [ { "value": "." } ],
         "SWVERSION": [ { "value": "2022.2" } ],
-        "SYNTHESISFLOW": [ { "value": "OUT_OF_CONTEXT" } ]
+        "SYNTHESISFLOW": [ { "value": "GLOBAL" } ]
       }
     },
     "boundary": {

@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 `ifndef PROJECT_ROOT
-`define PROJECT_ROOT "D:/Intership"
+`define PROJECT_ROOT "D:/Intership/ip_repo/emg_accelerator_1_0/src"
 `endif
 
 // Final EMG gesture accelerator top for synthesis/IP packaging.
@@ -125,10 +125,6 @@ module accelerator #(
     wire [TIME_W-1:0] stem_to_dw1_slice_tile_t_base;
     wire [4:0] stem_to_dw1_slice_tile_oc_base;
     wire signed [ROWS*STEM_OC_LANES*DATA_W-1:0] stem_to_dw1_slice_tile;
-    reg stem_to_dw1_stage_valid;
-    reg [TIME_W-1:0] stem_to_dw1_stage_tile_t_base;
-    reg [4:0] stem_to_dw1_stage_tile_oc_base;
-    reg signed [ROWS*STEM_OC_LANES*DATA_W-1:0] stem_to_dw1_stage_tile;
     wire [TIME_W-1:0] stem_to_dw1_out_tile_t_base;
     wire [4:0] stem_to_dw1_out_tile_oc_base;
     wire signed [ROWS*STEM_OC_LANES*DATA_W-1:0] stem_to_dw1_out_tile;
@@ -163,10 +159,6 @@ module accelerator #(
     wire [TIME_W-1:0] dw1_to_pw1_slice_t;
     wire [4:0] dw1_to_pw1_slice_ch_base;
     wire signed [STEM_OC_LANES*DATA_W-1:0] dw1_to_pw1_slice_vec;
-    reg dw1_to_pw1_stage_valid;
-    reg [TIME_W-1:0] dw1_to_pw1_stage_t;
-    reg [4:0] dw1_to_pw1_stage_ch_base;
-    reg signed [STEM_OC_LANES*DATA_W-1:0] dw1_to_pw1_stage_vec;
     wire [TIME_W-1:0] dw1_to_pw1_out_t;
     wire [4:0] dw1_to_pw1_out_ch_base;
     wire signed [STEM_OC_LANES*DATA_W-1:0] dw1_to_pw1_out_vec;
@@ -203,10 +195,6 @@ module accelerator #(
     wire [LOW_TIME_W-1:0] pw1_to_dw2_slice_pool_t_base;
     wire [5:0] pw1_to_dw2_slice_oc_base;
     wire signed [POOL_ROWS*PW1_OC_LANES*DATA_W-1:0] pw1_to_dw2_slice_tile;
-    reg pw1_to_dw2_stage_valid;
-    reg [LOW_TIME_W-1:0] pw1_to_dw2_stage_pool_t_base;
-    reg [5:0] pw1_to_dw2_stage_oc_base;
-    reg signed [POOL_ROWS*PW1_OC_LANES*DATA_W-1:0] pw1_to_dw2_stage_tile;
     wire [LOW_TIME_W-1:0] pw1_to_dw2_pool_t_base;
     wire [5:0] pw1_to_dw2_oc_base;
     wire signed [POOL_ROWS*PW1_OC_LANES*DATA_W-1:0] pw1_to_dw2_tile;
@@ -240,10 +228,6 @@ module accelerator #(
     wire [LOW_TIME_W-1:0] dw2_to_pw2_slice_t;
     wire [5:0] dw2_to_pw2_slice_ch_base;
     wire signed [CH_LANES*DATA_W-1:0] dw2_to_pw2_slice_vec;
-    reg dw2_to_pw2_stage_valid;
-    reg [LOW_TIME_W-1:0] dw2_to_pw2_stage_t;
-    reg [5:0] dw2_to_pw2_stage_ch_base;
-    reg signed [CH_LANES*DATA_W-1:0] dw2_to_pw2_stage_vec;
     wire [LOW_TIME_W-1:0] dw2_to_pw2_out_t;
     wire [5:0] dw2_to_pw2_out_ch_base;
     wire signed [CH_LANES*DATA_W-1:0] dw2_to_pw2_out_vec;
@@ -324,11 +308,6 @@ module accelerator #(
     wire [DW2_PENDING_CNT_W-1:0] dw2_pending_count_after_pop;
     wire [DW2_PENDING_CNT_W-1:0] dw2_pending_count_next;
     wire pw1_out_fire;
-    wire stem_to_dw1_stage_ready;
-    wire dw1_to_pw1_stage_ready;
-    wire pw1_to_dw2_stage_ready;
-    wire dw2_to_pw2_stage_ready;
-
     assign class_valid = fc_result_valid;
     assign class_idx = fc_class_idx;
 
@@ -390,13 +369,11 @@ module accelerator #(
         stem_to_dw1_slice_tile_oc_base,
         stem_to_dw1_slice_tile
     } = stem_to_dw1_slice_out;
-    assign stem_to_dw1_stage_ready =
-        !stem_to_dw1_stage_valid || stem_to_dw1_in_ready;
-    assign stem_to_dw1_slice_ready = stem_to_dw1_stage_ready;
-    assign stem_to_dw1_in_valid = stem_to_dw1_stage_valid;
-    assign stem_to_dw1_out_tile_t_base = stem_to_dw1_stage_tile_t_base;
-    assign stem_to_dw1_out_tile_oc_base = stem_to_dw1_stage_tile_oc_base;
-    assign stem_to_dw1_out_tile = stem_to_dw1_stage_tile;
+    assign stem_to_dw1_slice_ready = stem_to_dw1_in_ready;
+    assign stem_to_dw1_in_valid = stem_to_dw1_slice_valid;
+    assign stem_to_dw1_out_tile_t_base = stem_to_dw1_slice_tile_t_base;
+    assign stem_to_dw1_out_tile_oc_base = stem_to_dw1_slice_tile_oc_base;
+    assign stem_to_dw1_out_tile = stem_to_dw1_slice_tile;
 
     assign dw1_pending_push = busy
         && stem_to_dw1_in_valid
@@ -416,13 +393,11 @@ module accelerator #(
         dw1_to_pw1_slice_ch_base,
         dw1_to_pw1_slice_vec
     } = dw1_to_pw1_slice_out;
-    assign dw1_to_pw1_stage_ready =
-        !dw1_to_pw1_stage_valid || dw1_to_pw1_in_ready;
-    assign dw1_to_pw1_slice_ready = dw1_to_pw1_stage_ready;
-    assign dw1_to_pw1_in_valid = dw1_to_pw1_stage_valid;
-    assign dw1_to_pw1_out_t = dw1_to_pw1_stage_t;
-    assign dw1_to_pw1_out_ch_base = dw1_to_pw1_stage_ch_base;
-    assign dw1_to_pw1_out_vec = dw1_to_pw1_stage_vec;
+    assign dw1_to_pw1_slice_ready = dw1_to_pw1_in_ready;
+    assign dw1_to_pw1_in_valid = dw1_to_pw1_slice_valid;
+    assign dw1_to_pw1_out_t = dw1_to_pw1_slice_t;
+    assign dw1_to_pw1_out_ch_base = dw1_to_pw1_slice_ch_base;
+    assign dw1_to_pw1_out_vec = dw1_to_pw1_slice_vec;
 
     assign pw1_to_dw2_slice_in = {
         pw1_out_pool_t_base[LOW_TIME_W-1:0],
@@ -434,13 +409,11 @@ module accelerator #(
         pw1_to_dw2_slice_oc_base,
         pw1_to_dw2_slice_tile
     } = pw1_to_dw2_slice_out;
-    assign pw1_to_dw2_stage_ready =
-        !pw1_to_dw2_stage_valid || pw1_to_dw2_out_ready;
-    assign pw1_to_dw2_slice_ready = pw1_to_dw2_stage_ready;
-    assign pw1_to_dw2_slice_valid = pw1_to_dw2_stage_valid;
-    assign pw1_to_dw2_pool_t_base = pw1_to_dw2_stage_pool_t_base;
-    assign pw1_to_dw2_oc_base = pw1_to_dw2_stage_oc_base;
-    assign pw1_to_dw2_tile = pw1_to_dw2_stage_tile;
+    assign pw1_to_dw2_slice_ready = pw1_to_dw2_out_ready;
+    assign pw1_to_dw2_slice_valid = pw1_to_dw2_slice_raw_valid;
+    assign pw1_to_dw2_pool_t_base = pw1_to_dw2_slice_pool_t_base;
+    assign pw1_to_dw2_oc_base = pw1_to_dw2_slice_oc_base;
+    assign pw1_to_dw2_tile = pw1_to_dw2_slice_tile;
     assign pw1_to_dw2_in_valid = pw1_to_dw2_slice_valid && dw2_pending_room;
     assign pw1_to_dw2_out_ready = pw1_to_dw2_in_ready && dw2_pending_room;
     assign pw1_out_fire = pw1_out_valid && pw1_out_ready;
@@ -456,13 +429,11 @@ module accelerator #(
         dw2_to_pw2_slice_ch_base,
         dw2_to_pw2_slice_vec
     } = dw2_to_pw2_slice_out;
-    assign dw2_to_pw2_stage_ready =
-        !dw2_to_pw2_stage_valid || dw2_to_pw2_in_ready;
-    assign dw2_to_pw2_slice_ready = dw2_to_pw2_stage_ready;
-    assign dw2_to_pw2_in_valid = dw2_to_pw2_stage_valid;
-    assign dw2_to_pw2_out_t = dw2_to_pw2_stage_t;
-    assign dw2_to_pw2_out_ch_base = dw2_to_pw2_stage_ch_base;
-    assign dw2_to_pw2_out_vec = dw2_to_pw2_stage_vec;
+    assign dw2_to_pw2_slice_ready = dw2_to_pw2_in_ready;
+    assign dw2_to_pw2_in_valid = dw2_to_pw2_slice_valid;
+    assign dw2_to_pw2_out_t = dw2_to_pw2_slice_t;
+    assign dw2_to_pw2_out_ch_base = dw2_to_pw2_slice_ch_base;
+    assign dw2_to_pw2_out_vec = dw2_to_pw2_slice_vec;
 
     assign dw2_pending_pop = dw2_start_now;
     assign dw2_pending_count_next = dw2_pending_count
@@ -968,69 +939,6 @@ module accelerator #(
         .input_count_error(),
         .logits_vec()
     );
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n || buffer_clear) begin
-            stem_to_dw1_stage_valid <= 1'b0;
-            stem_to_dw1_stage_tile_t_base <= {TIME_W{1'b0}};
-            stem_to_dw1_stage_tile_oc_base <= 5'd0;
-            stem_to_dw1_stage_tile <= {(ROWS*STEM_OC_LANES*DATA_W){1'b0}};
-
-            dw1_to_pw1_stage_valid <= 1'b0;
-            dw1_to_pw1_stage_t <= {TIME_W{1'b0}};
-            dw1_to_pw1_stage_ch_base <= 5'd0;
-            dw1_to_pw1_stage_vec <= {(STEM_OC_LANES*DATA_W){1'b0}};
-
-            pw1_to_dw2_stage_valid <= 1'b0;
-            pw1_to_dw2_stage_pool_t_base <= {LOW_TIME_W{1'b0}};
-            pw1_to_dw2_stage_oc_base <= 6'd0;
-            pw1_to_dw2_stage_tile <= {(POOL_ROWS*PW1_OC_LANES*DATA_W){1'b0}};
-
-            dw2_to_pw2_stage_valid <= 1'b0;
-            dw2_to_pw2_stage_t <= {LOW_TIME_W{1'b0}};
-            dw2_to_pw2_stage_ch_base <= 6'd0;
-            dw2_to_pw2_stage_vec <= {(CH_LANES*DATA_W){1'b0}};
-        end else begin
-            if (stem_to_dw1_stage_ready) begin
-                stem_to_dw1_stage_valid <= stem_to_dw1_slice_valid;
-                if (stem_to_dw1_slice_valid) begin
-                    stem_to_dw1_stage_tile_t_base
-                        <= stem_to_dw1_slice_tile_t_base;
-                    stem_to_dw1_stage_tile_oc_base
-                        <= stem_to_dw1_slice_tile_oc_base;
-                    stem_to_dw1_stage_tile <= stem_to_dw1_slice_tile;
-                end
-            end
-
-            if (dw1_to_pw1_stage_ready) begin
-                dw1_to_pw1_stage_valid <= dw1_to_pw1_slice_valid;
-                if (dw1_to_pw1_slice_valid) begin
-                    dw1_to_pw1_stage_t <= dw1_to_pw1_slice_t;
-                    dw1_to_pw1_stage_ch_base <= dw1_to_pw1_slice_ch_base;
-                    dw1_to_pw1_stage_vec <= dw1_to_pw1_slice_vec;
-                end
-            end
-
-            if (pw1_to_dw2_stage_ready) begin
-                pw1_to_dw2_stage_valid <= pw1_to_dw2_slice_raw_valid;
-                if (pw1_to_dw2_slice_raw_valid) begin
-                    pw1_to_dw2_stage_pool_t_base
-                        <= pw1_to_dw2_slice_pool_t_base;
-                    pw1_to_dw2_stage_oc_base <= pw1_to_dw2_slice_oc_base;
-                    pw1_to_dw2_stage_tile <= pw1_to_dw2_slice_tile;
-                end
-            end
-
-            if (dw2_to_pw2_stage_ready) begin
-                dw2_to_pw2_stage_valid <= dw2_to_pw2_slice_valid;
-                if (dw2_to_pw2_slice_valid) begin
-                    dw2_to_pw2_stage_t <= dw2_to_pw2_slice_t;
-                    dw2_to_pw2_stage_ch_base <= dw2_to_pw2_slice_ch_base;
-                    dw2_to_pw2_stage_vec <= dw2_to_pw2_slice_vec;
-                end
-            end
-        end
-    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 `ifndef PROJECT_ROOT
-`define PROJECT_ROOT "D:/Intership"
+`define PROJECT_ROOT "D:/Intership/ip_repo/emg_accelerator_1_0/src"
 `endif
 
 // LightCNN1D stem Conv1d 4x4 output-stationary systolic compute tile.

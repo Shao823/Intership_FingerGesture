@@ -2,7 +2,7 @@
 
 module emg_stream_fifo_slice #(
     parameter integer DATA_W = 8,
-    parameter integer DEPTH  = 4,
+    parameter integer DEPTH  = 2,
     parameter integer PTR_W  = (DEPTH <= 1) ? 1 : $clog2(DEPTH),
     parameter integer CNT_W  = (DEPTH <= 1) ? 1 : $clog2(DEPTH + 1)
 ) (
