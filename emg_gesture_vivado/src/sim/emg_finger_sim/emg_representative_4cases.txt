@@ -1,0 +1,4 @@
+packed_case=0 source_case=6 offset=0x0000 bytes=1740 expected_class=1
+packed_case=1 source_case=8 offset=0x06CC bytes=1740 expected_class=2
+packed_case=2 source_case=0 offset=0x0D98 bytes=1740 expected_class=3
+packed_case=3 source_case=2 offset=0x1464 bytes=1740 expected_class=4

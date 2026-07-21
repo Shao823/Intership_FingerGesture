@@ -2,6 +2,7 @@
   "schema": "xilinx.com:schema:json_instance:1.0",
   "ip_inst": {
     "xci_name": "blk_mem_gen_stem_weight",
+    "cell_name": "u_accelerator/u_stem/u_weight/u_stem_weight_rom",
     "component_reference": "xilinx.com:ip:blk_mem_gen:8.4",
     "ip_revision": "5",
     "gen_directory": "../../../../../intership/emg_gesture_vivado/emg_gesture_vivado.tmp/emg_accelerator_v1_0_project/emg_accelerator_v1_0_project.gen/sources_1/ip/blk_mem_gen_stem_weight",

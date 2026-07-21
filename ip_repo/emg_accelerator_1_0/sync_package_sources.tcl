@@ -16,7 +16,6 @@ proc configure_verilog_files {files used_in} {
     foreach source_file $files {
         set file_object [get_files -quiet $source_file]
         if {[llength $file_object] != 0} {
-            set_property LIBRARY xil_defaultlib $file_object
             set_property USED_IN $used_in $file_object
         }
     }

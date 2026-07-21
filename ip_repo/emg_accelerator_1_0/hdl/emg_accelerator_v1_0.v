@@ -2,12 +2,16 @@
 
 module emg_accelerator_v1_0 #(
     parameter integer C_S00_AXI_DATA_WIDTH = 32,
-    parameter integer C_S00_AXI_ADDR_WIDTH = 5,
+    parameter integer C_S00_AXI_ADDR_WIDTH = 6,
     parameter integer C_S00_AXIS_TDATA_WIDTH = 32,
     parameter integer C_FRAME_WORDS = 435,
     parameter integer C_FRAME_BYTES = 1740
 ) (
     output wire irq,
+    output wire class_valid,
+    output wire [2:0] class_id,
+    output wire inference_done,
+    output wire inference_busy,
 
     input  wire s00_axi_aclk,
     input  wire s00_axi_aresetn,
@@ -85,6 +89,10 @@ module emg_accelerator_v1_0 #(
     assign start_reject_no_frame = ctrl_start_pulse
         && !core_busy
         && !frame_ready;
+    assign class_valid = core_class_valid;
+    assign class_id = core_class_idx;
+    assign inference_done = core_done;
+    assign inference_busy = core_busy;
 
     initial begin
         if (C_S00_AXI_DATA_WIDTH != 32) begin

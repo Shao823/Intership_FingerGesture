@@ -54,6 +54,7 @@ iverilog -g2012 -Wall \
   "-DEMG_TEST_PROJECT_ROOT=\"${PROJECT_ROOT}\"" \
   -s tb_emg_accelerator_dma_system \
   -P tb_emg_accelerator_dma_system.TEST_CASE="${TEST_CASE}" \
+  -P tb_emg_accelerator_dma_system.RUN_ALL_CASES=0 \
   -o "${OUTPUT}" \
   "${rtl_files[@]}"
 

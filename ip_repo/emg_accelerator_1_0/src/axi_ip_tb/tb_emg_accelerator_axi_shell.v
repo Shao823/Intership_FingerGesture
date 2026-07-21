@@ -51,8 +51,12 @@ module tb_emg_accelerator_axi_shell;
     reg clk;
     reg rst_n;
     wire irq;
+    wire class_valid;
+    wire [2:0] class_id;
+    wire inference_done;
+    wire inference_busy;
 
-    reg [4:0] awaddr;
+    reg [5:0] awaddr;
     reg awvalid;
     wire awready;
     reg [31:0] wdata;
@@ -62,7 +66,7 @@ module tb_emg_accelerator_axi_shell;
     wire [1:0] bresp;
     wire bvalid;
     reg bready;
-    reg [4:0] araddr;
+    reg [5:0] araddr;
     reg arvalid;
     wire arready;
     wire [31:0] rdata;
@@ -78,9 +82,16 @@ module tb_emg_accelerator_axi_shell;
 
     reg [31:0] read_value;
     integer index;
+    reg saw_class_valid;
+    reg saw_inference_done;
+    reg [2:0] observed_class_id;
 
     emg_accelerator_v1_0 dut (
         .irq(irq),
+        .class_valid(class_valid),
+        .class_id(class_id),
+        .inference_done(inference_done),
+        .inference_busy(inference_busy),
         .s00_axi_aclk(clk),
         .s00_axi_aresetn(rst_n),
         .s00_axi_awaddr(awaddr),
@@ -113,6 +124,22 @@ module tb_emg_accelerator_axi_shell;
 
     always #5 clk = ~clk;
 
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            saw_class_valid <= 1'b0;
+            saw_inference_done <= 1'b0;
+            observed_class_id <= 3'd0;
+        end else begin
+            if (class_valid) begin
+                saw_class_valid <= 1'b1;
+                observed_class_id <= class_id;
+            end
+            if (inference_done) begin
+                saw_inference_done <= 1'b1;
+            end
+        end
+    end
+
     task axis_send;
         input [31:0] value;
         input last;
@@ -132,7 +159,7 @@ module tb_emg_accelerator_axi_shell;
     endtask
 
     task axi_write;
-        input [4:0] address;
+        input [5:0] address;
         input [31:0] value;
         begin
             @(negedge clk);
@@ -156,7 +183,7 @@ module tb_emg_accelerator_axi_shell;
     endtask
 
     task axi_read;
-        input [4:0] address;
+        input [5:0] address;
         output [31:0] value;
         begin
             @(negedge clk);
@@ -193,6 +220,9 @@ module tb_emg_accelerator_axi_shell;
         tkeep = 4'hf;
         tlast = 0;
         tvalid = 0;
+        saw_class_valid = 1'b0;
+        saw_inference_done = 1'b0;
+        observed_class_id = 3'd0;
         repeat (5) @(posedge clk);
         rst_n = 1'b1;
 
@@ -200,7 +230,7 @@ module tb_emg_accelerator_axi_shell;
             axis_send(index, index == 434);
         end
 
-        axi_read(5'h04, read_value);
+        axi_read(6'h04, read_value);
         if (!read_value[2] || read_value[0]) begin
             $display(
                 "FAIL frame ready status=%h beats=%0d frames=%0d errors=%b%b%b%b",
@@ -215,21 +245,31 @@ module tb_emg_accelerator_axi_shell;
             $fatal;
         end
 
-        axi_write(5'h00, 32'h0000_0011);
+        axi_write(6'h20, 32'h0000_0002);
+        axi_write(6'h00, 32'h0000_0001);
         repeat (2) @(posedge clk);
-        axi_read(5'h04, read_value);
+        axi_read(6'h04, read_value);
         if (!read_value[0] || read_value[2]) begin
             $display("FAIL start/consume status %h", read_value);
             $fatal;
         end
 
         wait (irq);
-        axi_read(5'h08, read_value);
+        axi_read(6'h08, read_value);
         if (read_value[2:0] != 3'd3) begin
             $display("FAIL result %h", read_value);
             $fatal;
         end
-        axi_read(5'h04, read_value);
+        if (!saw_class_valid || !saw_inference_done || observed_class_id != 3'd3) begin
+            $display(
+                "FAIL functional outputs class_valid=%b done=%b class_id=%0d",
+                saw_class_valid,
+                saw_inference_done,
+                observed_class_id
+            );
+            $fatal;
+        end
+        axi_read(6'h04, read_value);
         if (!read_value[1] || !read_value[6] || read_value[0]) begin
             $display("FAIL completion status %h", read_value);
             $fatal;

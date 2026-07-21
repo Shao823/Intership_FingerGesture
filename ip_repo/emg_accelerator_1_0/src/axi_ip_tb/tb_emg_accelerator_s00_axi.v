@@ -27,7 +27,7 @@ module tb_emg_accelerator_s00_axi;
     reg start_reject_busy;
     reg [31:0] inference_cycles;
 
-    reg [4:0] awaddr;
+    reg [5:0] awaddr;
     reg awvalid;
     wire awready;
     reg [31:0] wdata;
@@ -37,7 +37,7 @@ module tb_emg_accelerator_s00_axi;
     wire [1:0] bresp;
     wire bvalid;
     reg bready;
-    reg [4:0] araddr;
+    reg [5:0] araddr;
     reg arvalid;
     wire arready;
     wire [31:0] rdata;
@@ -105,7 +105,7 @@ module tb_emg_accelerator_s00_axi;
     end
 
     task axi_write;
-        input [4:0] address;
+        input [5:0] address;
         input [31:0] value;
         begin
             @(negedge clk);
@@ -128,8 +128,68 @@ module tb_emg_accelerator_s00_axi;
         end
     endtask
 
+    task axi_write_aw_first;
+        input [5:0] address;
+        input [31:0] value;
+        begin
+            @(negedge clk);
+            awaddr = address;
+            awvalid = 1'b1;
+            bready = 1'b1;
+            while (!awready) begin
+                @(posedge clk);
+            end
+            @(negedge clk);
+            awvalid = 1'b0;
+            repeat (2) @(posedge clk);
+            @(negedge clk);
+            wdata = value;
+            wvalid = 1'b1;
+            while (!wready) begin
+                @(posedge clk);
+            end
+            @(negedge clk);
+            wvalid = 1'b0;
+            while (!bvalid) begin
+                @(posedge clk);
+            end
+            @(negedge clk);
+            bready = 1'b0;
+        end
+    endtask
+
+    task axi_write_w_first;
+        input [5:0] address;
+        input [31:0] value;
+        begin
+            @(negedge clk);
+            wdata = value;
+            wvalid = 1'b1;
+            bready = 1'b1;
+            while (!wready) begin
+                @(posedge clk);
+            end
+            @(negedge clk);
+            wvalid = 1'b0;
+            repeat (2) @(posedge clk);
+            @(negedge clk);
+            awaddr = address;
+            awvalid = 1'b1;
+            while (!awready) begin
+                @(posedge clk);
+            end
+            @(negedge clk);
+            awvalid = 1'b0;
+            while (!bvalid) begin
+                @(posedge clk);
+            end
+            @(negedge clk);
+            bready = 1'b0;
+        end
+    endtask
+
     task axi_read;
-        input [4:0] address;
+        input [5:0] address;
         output [31:0] value;
         begin
             @(negedge clk);
@@ -183,21 +243,21 @@ module tb_emg_accelerator_s00_axi;
         repeat (4) @(posedge clk);
         rst_n = 1'b1;
 
-        axi_read(5'h0c, read_value);
+        axi_read(6'h0c, read_value);
         if (read_value != {16'd1740, 16'd435}) begin
             $display("FAIL FRAME_INFO %h", read_value);
             $fatal;
         end
 
-        axi_write(5'h00, 32'h0000_0012);
+        axi_write_aw_first(6'h20, 32'h0000_0003);
         if (!auto_start || !irq_enable) begin
-            $display("FAIL persistent control bits");
+            $display("FAIL AW-first CONFIG write");
             $fatal;
         end
 
         fork
             begin
-                axi_write(5'h00, 32'h0000_0013);
+                axi_write_w_first(6'h00, 32'h0000_0001);
             end
             begin
                 wait (start_pulse);
@@ -210,14 +270,14 @@ module tb_emg_accelerator_s00_axi;
         @(posedge clk);
         @(negedge clk);
         start_reject_no_frame = 1'b0;
-        axi_read(5'h14, read_value);
+        axi_read(6'h14, read_value);
         if (!read_value[4]) begin
             $display("FAIL rejected start sticky");
             $fatal;
         end
 
-        axi_write(5'h00, 32'h0000_001a);
-        axi_read(5'h14, read_value);
+        axi_write(6'h00, 32'h0000_0004);
+        axi_read(6'h14, read_value);
         if (read_value[5:0] != 6'd0 || !saw_clear_errors) begin
             $display("FAIL clear errors %h", read_value);
             $fatal;
@@ -232,26 +292,32 @@ module tb_emg_accelerator_s00_axi;
         core_class_valid = 1'b0;
         core_done = 1'b0;
 
-        axi_read(5'h08, read_value);
+        axi_read(6'h08, read_value);
         if (read_value[2:0] != 3'd4) begin
             $display("FAIL class result");
             $fatal;
         end
-        axi_read(5'h04, read_value);
+        axi_read(6'h04, read_value);
         if (!read_value[1] || !read_value[6] || !irq) begin
             $display("FAIL done/irq status %h", read_value);
             $fatal;
         end
-        axi_read(5'h18, read_value);
+        axi_read(6'h18, read_value);
         if (read_value != 32'd12345) begin
             $display("FAIL cycle count");
             $fatal;
         end
 
-        axi_write(5'h00, 32'h0000_0016);
-        axi_read(5'h04, read_value);
+        axi_write(6'h00, 32'h0000_0002);
+        axi_read(6'h04, read_value);
         if (read_value[1] || irq) begin
             $display("FAIL clear done");
+            $fatal;
+        end
+
+        axi_read(6'h20, read_value);
+        if (read_value[1:0] != 2'b11) begin
+            $display("FAIL commands changed CONFIG %h", read_value);
             $fatal;
         end
 

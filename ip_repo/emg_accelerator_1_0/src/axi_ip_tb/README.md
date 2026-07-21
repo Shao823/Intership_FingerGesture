@@ -24,6 +24,15 @@ declaration if Vivado also compiles the real `src/accelerator.v`.
 
 ## DDR + DMA + Real Accelerator Test
 
+Before launching this test in the Vivado Edit Packaged IP project, run:
+
+```tcl
+source D:/Intership/ip_repo/emg_accelerator_1_0/prepare_simulation_libraries.tcl
+```
+
+This only changes Library properties in the current Vivado project session. It
+does not persist Library entries into `component.xml` or the packaged IP.
+
 Run case 0 from the repository root:
 
 ```bash
@@ -36,6 +45,11 @@ Select another one of the ten generated test cases:
 DMA_SYSTEM_TEST_CASE=3 \
   ./ip_repo/emg_accelerator_1_0/src/axi_ip_tb/run_dma_system_test.sh
 ```
+
+The command-line script always sets `RUN_ALL_CASES=0`, so it only runs the
+selected `DMA_SYSTEM_TEST_CASE`. In the Vivado GUI, the testbench parameter
+defaults to `RUN_ALL_CASES=1`, so launching
+`tb_emg_accelerator_dma_system` runs all ten generated cases sequentially.
 
 The test performs this sequence:
 
