@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="ASCII"?>
+<sdkproject:SdkProject xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:sdkproject="http://www.xilinx.com/sdkproject" name="emg_finger_baremetal" location="D:/Intership/emg_gesture_vitis/emg_finger/emg_finger_baremetal" platform="D:/Intership/emg_gesture_vitis/emg_finger/emg_finger_wrapper/export/emg_finger_wrapper/emg_finger_wrapper.xpfm" platformUID="xilinx:::0.0(custom)" systemProject="emg_finger_baremetal_system" sysConfig="emg_finger_wrapper" runtime="cpp" cpu="standalone_psu_cortexa53_0" cpuInstance="psu_cortexa53_0" os="standalone" mssSignature="9f6498803c5e398c32de5adae7f4ec86">
+  <configuration name="Debug" id="xilinx.gnu.arm.a53.exe.debug.569553185">
+    <configBuildOptions xsi:type="sdkproject:SdkOptions"/>
+    <lastBuildOptions xsi:type="sdkproject:SdkOptions"/>
+  </configuration>
+  <configuration name="Release" id="xilinx.gnu.arm.a53.exe.release.687916577" dirty="true">
+    <configBuildOptions xsi:type="sdkproject:SdkOptions"/>
+  </configuration>
+  <template appTemplateName="empty_application"/>
+</sdkproject:SdkProject>

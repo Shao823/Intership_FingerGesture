@@ -7,6 +7,84 @@
 # Local tooling (e.g. iverilog source for local build) — not part of design.
 /tools/
 
+# Operating-system, editor, and local tool state.
+/.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+.claude/
+.codex/
+.agents/
+
+# Vivado/Xilinx temporary state and generated reports.
+/.Xil/
+/.srcs/
+*.jou
+*.log
+*.str
+*.wdb
+*.wcfg
+*.ltx
+*.dcp
+*.rds
+*.pb
+*.backup.*
+
+# Generated hardware exports and local scratch directories.
+/hardware_export/
+/tmp/
+/screenshot/
+/screenshots/
+/emg_gesture_vivado.gen/
+/course_s1_ALINX_ZYNQ_MPSoC开发平台FPGA教程V1.03.pdf
+
+# Vivado project products. Keep src/ and selected IP .xci files below.
+/emg_gesture_vivado/*.cache/
+/emg_gesture_vivado/*.gen/
+/emg_gesture_vivado/*.hw/
+/emg_gesture_vivado/*.ip_user_files/
+/emg_gesture_vivado/*.runs/
+/emg_gesture_vivado/*.sim/
+/emg_gesture_vivado/*.tmp/
+/emg_gesture_vivado/.Xil/
+/emg_gesture_vivado/emg_gesture_vivado.srcs/constrs_1/
+/emg_gesture_vivado/emg_gesture_vivado.srcs/sim_1/
+/emg_gesture_vivado/emg_gesture_vivado.srcs/utils_1/
+
+# Vitis workspace metadata and generated platform/BSP/application output.
+/emg_gesture_vitis/**/.metadata/
+/emg_gesture_vitis/**/.analytics
+/emg_gesture_vitis/**/.log
+/emg_gesture_vitis/**/RemoteSystemsTempFiles/
+/emg_gesture_vitis/**/.settings/
+/emg_gesture_vitis/**/Debug/
+/emg_gesture_vitis/**/Release/
+/emg_gesture_vitis/**/_ide/
+/emg_gesture_vitis/**/export/
+/emg_gesture_vitis/**/hw/
+/emg_gesture_vitis/**/logs/
+/emg_gesture_vitis/**/resources/
+/emg_gesture_vitis/**/psu_cortexa53_0/
+/emg_gesture_vitis/**/zynqmp_fsbl/
+/emg_gesture_vitis/**/zynqmp_pmufw/
+
+# Generated hardware/software packages and binaries.
+*.xsa
+*.xpfm
+*.elf
+*.bit
+*.bin
+*.mmi
+*.bda
+*.xpe
+*.xmp
+
+# Language/tool caches.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
 # Vivado project: track hand-written RTL/test sources and IP configuration only.
 # Keep generated runs/cache/simulation/output products ignored.
 /emg_gesture_vivado/*
