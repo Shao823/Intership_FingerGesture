@@ -7,6 +7,16 @@
 # Local tooling (e.g. iverilog source for local build) — not part of design.
 /tools/
 
+# Local research, work logs, design notes, and process documentation.
+# These files are kept locally but are not part of the remote code repository.
+/workdir/
+/preparation/
+/工程实现流程建议/
+/ARCHITECTURE.md
+/PROJECT_STATUS.md
+/codex.md
+/代码工程风格.md
+
 # Operating-system, editor, and local tool state.
 /.DS_Store
 Thumbs.db
@@ -88,6 +98,7 @@ __pycache__/
 # Vivado project: track hand-written RTL/test sources and IP configuration only.
 # Keep generated runs/cache/simulation/output products ignored.
 /emg_gesture_vivado/*
+!/emg_gesture_vivado/emg_gesture_vivado.xpr
 !/emg_gesture_vivado/src/
 !/emg_gesture_vivado/src/**
 /emg_gesture_vivado/src/**/__pycache__/
@@ -97,8 +108,20 @@ __pycache__/
 /emg_gesture_vivado/emg_gesture_vivado.srcs/*
 !/emg_gesture_vivado/emg_gesture_vivado.srcs/sources_1/
 /emg_gesture_vivado/emg_gesture_vivado.srcs/sources_1/*
+!/emg_gesture_vivado/emg_gesture_vivado.srcs/sources_1/bd/
+/emg_gesture_vivado/emg_gesture_vivado.srcs/sources_1/bd/*
+!/emg_gesture_vivado/emg_gesture_vivado.srcs/sources_1/bd/emg_finger/
+/emg_gesture_vivado/emg_gesture_vivado.srcs/sources_1/bd/emg_finger/*
+!/emg_gesture_vivado/emg_gesture_vivado.srcs/sources_1/bd/emg_finger/emg_finger.bd
 !/emg_gesture_vivado/emg_gesture_vivado.srcs/sources_1/ip/
 /emg_gesture_vivado/emg_gesture_vivado.srcs/sources_1/ip/*
 !/emg_gesture_vivado/emg_gesture_vivado.srcs/sources_1/ip/*/
 /emg_gesture_vivado/emg_gesture_vivado.srcs/sources_1/ip/*/*
 !/emg_gesture_vivado/emg_gesture_vivado.srcs/sources_1/ip/*/*.xci
+
+# Keep the hand-written top-level constraint file.
+!/emg_gesture_vivado/emg_gesture_vivado.srcs/constrs_1/
+/emg_gesture_vivado/emg_gesture_vivado.srcs/constrs_1/*
+!/emg_gesture_vivado/emg_gesture_vivado.srcs/constrs_1/new/
+/emg_gesture_vivado/emg_gesture_vivado.srcs/constrs_1/new/*
+!/emg_gesture_vivado/emg_gesture_vivado.srcs/constrs_1/new/emg_gesture.xdc
