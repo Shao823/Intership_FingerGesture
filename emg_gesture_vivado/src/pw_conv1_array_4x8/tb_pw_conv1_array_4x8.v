@@ -29,7 +29,8 @@ module tb_pw_conv1_array_4x8 #(
     localparam integer FRAC_BITS  = 8;
     localparam integer TIME_W     = 9;
     localparam integer INPUT_LEN  = 348;
-    localparam integer TOP_CASES  = 9;
+    localparam integer POOL_LEN   = INPUT_LEN / 2;
+    localparam integer TOP_CASES  = 4;
     localparam integer DONE_TIMEOUT = 10000;
 
     localparam integer STALL_NONE     = 0;
@@ -100,7 +101,7 @@ module tb_pw_conv1_array_4x8 #(
 
     reg signed [DATA_W-1:0] file_input [0:INPUT_LEN*PW1_IC-1];
     reg [15:0] file_top_case_t_base [0:TOP_CASES-1];
-    reg signed [DATA_W-1:0] file_expected_top [0:TOP_CASES*POOL_ROWS*PW1_OC-1];
+    reg signed [DATA_W-1:0] file_expected_top [0:POOL_LEN*PW1_OC-1];
     reg signed [MULT_W-1:0] expected_bn_scale [0:PW1_OC-1];
     reg signed [31:0] expected_bn_bias [0:PW1_OC-1];
 
@@ -342,9 +343,11 @@ module tb_pw_conv1_array_4x8 #(
     function signed [DATA_W-1:0] expected_top_value;
         input integer pool_row;
         input integer oc_idx;
+        integer expected_pool_t;
         begin
+            expected_pool_t = (test_t_base >> 1) + pool_row;
             expected_top_value =
-                file_expected_top[top_case_idx*POOL_ROWS*PW1_OC + pool_row*PW1_OC + oc_idx];
+                file_expected_top[expected_pool_t*PW1_OC + oc_idx];
         end
     endfunction
 
@@ -591,12 +594,14 @@ module tb_pw_conv1_array_4x8 #(
                 $display("ERROR PW1 TB input.mem did not load");
                 errors = errors + 1;
             end
-            if ((^file_top_case_t_base[0]) === 1'bx) begin
-                $display("ERROR PW1 TB top_case_t_base.mem did not load");
+            if (((^file_top_case_t_base[0]) === 1'bx)
+                    || ((^file_top_case_t_base[TOP_CASES-1]) === 1'bx)) begin
+                $display("ERROR PW1 TB top_case_t_base.mem did not load all entries");
                 errors = errors + 1;
             end
-            if ((^file_expected_top[0]) === 1'bx) begin
-                $display("ERROR PW1 TB expected_top_checkpoint.mem did not load");
+            if (((^file_expected_top[0]) === 1'bx)
+                    || ((^file_expected_top[POOL_LEN*PW1_OC-1]) === 1'bx)) begin
+                $display("ERROR PW1 TB expected_top_checkpoint.mem did not load all entries");
                 errors = errors + 1;
             end
             if ((^expected_bn_scale[0]) === 1'bx) begin
@@ -628,7 +633,7 @@ module tb_pw_conv1_array_4x8 #(
 
     task run_with_wrong_tile_ready_first;
         begin
-            top_case_idx = 6;
+            top_case_idx = 2;
             test_oc_base = 48;
             test_t_base = file_top_case_t_base[top_case_idx];
             act_stall_mode = STALL_NONE;
@@ -663,7 +668,7 @@ module tb_pw_conv1_array_4x8 #(
 
     task run_with_busy_start_pulse;
         begin
-            top_case_idx = 5;
+            top_case_idx = 1;
             test_oc_base = 24;
             test_t_base = file_top_case_t_base[top_case_idx];
             act_stall_mode = STALL_NONE;
@@ -694,7 +699,7 @@ module tb_pw_conv1_array_4x8 #(
 
     task reset_during_busy;
         begin
-            top_case_idx = 4;
+            top_case_idx = 2;
             test_oc_base = 40;
             test_t_base = file_top_case_t_base[top_case_idx];
             act_stall_mode = STALL_PERIODIC;
@@ -775,8 +780,8 @@ module tb_pw_conv1_array_4x8 #(
         run_checked(3, 24, 0, STALL_NONE, OUT_STALL_DELAY);
 
         // Back-to-back jobs, no reset between them.
-        run_checked(4, 32, 0, STALL_NONE, OUT_STALL_NONE);
-        run_checked(5, 40, 0, STALL_PERIODIC, OUT_STALL_PERIODIC);
+        run_checked(0, 32, 0, STALL_NONE, OUT_STALL_NONE);
+        run_checked(1, 40, 0, STALL_PERIODIC, OUT_STALL_PERIODIC);
 
         run_with_wrong_tile_ready_first();
 
@@ -786,8 +791,8 @@ module tb_pw_conv1_array_4x8 #(
             run_checked(2, case_i * OC_LANES, 0, STALL_NONE, OUT_STALL_NONE);
         end
 
-        run_checked(7, 48, 0, STALL_LATE, OUT_STALL_PERIODIC);
-        run_checked(8, 56, 0, STALL_PERIODIC, OUT_STALL_LONG);
+        run_checked(2, 48, 0, STALL_LATE, OUT_STALL_PERIODIC);
+        run_checked(3, 56, 0, STALL_PERIODIC, OUT_STALL_LONG);
 
         run_with_busy_start_pulse();
 
